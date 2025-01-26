@@ -74,8 +74,8 @@ class TokenConfig:
     def __init__(self, token_id: str, token_symbol: str):
         self.token_id = token_id
         self.token_symbol = token_symbol
+        self.display_role = None  # Add this for the display role
         self.last_price = 0
-        # Remove 24h fields as they're calculated on-demand
 
 class GuildConfig:
     def __init__(self, guild_id):
@@ -83,6 +83,8 @@ class GuildConfig:
         self.is_tracking = False
         self.tokens = {}  # Dictionary of token_id: TokenConfig
         self.update_interval = 300  # Default 5 minutes in seconds
+        self.config_channel_id = None  # Channel for admin commands
+        self.display_channel_id = None  # Channel for price display
 
 async def fetch_token_price(token_id: str, retry_count=0):
     """Fetch token price from CoinGecko API with retries"""
@@ -190,14 +192,28 @@ def get_trend_indicator(price: float, last_price: float, change_24h: float) -> s
         return "↘️"  # Down trend
     return "➡️"  # Sideways
 
+async def create_or_get_role(guild: discord.Guild, name: str, reason: str) -> discord.Role:
+    """Create or get a role with the given name"""
+    role = discord.utils.get(guild.roles, name=name)
+    if not role:
+        try:
+            role = await guild.create_role(name=name, reason=reason)
+            # Move role to a higher position so it can be displayed
+            positions = {role: guild.me.top_role.position - 1}
+            await guild.edit_role_positions(positions)
+        except Exception as e:
+            logger.error(f"Error creating role {name}: {e}")
+            return None
+    return role
+
 @tasks.loop(seconds=60)
 async def update_price_info():
-    """Update bot nicknames for all tracked tokens"""
+    """Update bot nicknames and status for all tracked tokens"""
     try:
         current_time = int(time.time())
         logger.info("Running price update check...")
         
-        # Track 24h changes across all guilds for status
+        # Track all 24h changes for global status
         all_24h_changes = []
         
         for guild_id, config in tracked_guilds.items():
@@ -210,7 +226,7 @@ async def update_price_info():
                     config.last_update_time = 0
                 
                 if current_time - config.last_update_time < config.update_interval:
-                    logger.debug(f"Skipping update for guild {guild_id}, next update in {config.update_interval - (current_time - config.last_update_time)} seconds")
+                    logger.debug(f"Skipping update for guild {guild_id}")
                     continue
                 
                 guild = bot.get_guild(guild_id)
@@ -236,7 +252,7 @@ async def update_price_info():
                         price_str = f"{token_config.token_symbol}: ${current_price:.4f} {trend}"
                         status_parts.append(price_str)
                         
-                        # Track 24h change for status
+                        # Track 24h change for global status
                         if change_24h is not None:
                             all_24h_changes.append((token_config.token_symbol, change_24h))
                         
@@ -271,7 +287,7 @@ async def update_price_info():
         # Update global status with 24h changes
         if all_24h_changes:
             try:
-                # Format like: "watching 24h: BTC +5.2% | ETH -2.1%"
+                # Format like: "24h: PRIME +5.2%"
                 changes = [f"{symbol} {change:+.1f}%" for symbol, change in all_24h_changes]
                 status = "24h: " + " | ".join(changes)
                 
@@ -378,6 +394,12 @@ async def remove_token(interaction: discord.Interaction, token_symbol: str):
     for token_id, token_config in config.tokens.items():
         if token_config.token_symbol == token_symbol:
             token_id_to_remove = token_id
+            # Delete the role if it exists
+            if token_config.display_role:
+                try:
+                    await token_config.display_role.delete()
+                except Exception as e:
+                    logger.error(f"Error deleting role: {e}")
             break
     
     if token_id_to_remove:
@@ -422,21 +444,21 @@ def save_tracked_guilds():
             data[str(guild_id)] = {
                 "is_tracking": config.is_tracking,
                 "update_interval": config.update_interval,
+                "config_channel_id": config.config_channel_id,
+                "display_channel_id": config.display_channel_id,
                 "tokens": {
                     token_id: {
                         "symbol": token_config.token_symbol,
                         "last_price": token_config.last_price
-                        # Removed 24h fields as they're calculated dynamically
                     }
                     for token_id, token_config in config.tokens.items()
                 }
             }
         
-        # Save with temporary file to prevent corruption
         temp_file = f"{SAVE_FILE}.tmp"
         with open(temp_file, 'w') as f:
             json.dump(data, f, indent=4)
-        os.replace(temp_file, SAVE_FILE)  # Atomic operation
+        os.replace(temp_file, SAVE_FILE)
     except Exception as e:
         logger.error(f"Error saving tracked guilds: {e}")
 
@@ -452,17 +474,17 @@ def load_tracked_guilds():
                 config = GuildConfig(guild_id)
                 config.is_tracking = guild_data["is_tracking"]
                 config.update_interval = guild_data.get("update_interval", 300)
+                config.config_channel_id = guild_data.get("config_channel_id")
+                config.display_channel_id = guild_data.get("display_channel_id")
                 
                 for token_id, token_data in guild_data["tokens"].items():
                     token_config = TokenConfig(token_id, token_data["symbol"])
-                    # Use .get() with default values for backward compatibility
                     token_config.last_price = token_data.get("last_price", 0)
                     config.tokens[token_id] = token_config
                 
                 tracked_guilds[guild_id] = config
     except Exception as e:
         logger.error(f"Error loading tracked guilds: {e}")
-        # If there's an error loading the file, start fresh
         if os.path.exists(SAVE_FILE):
             backup_name = f"{SAVE_FILE}.backup.{int(time.time())}"
             try:
@@ -623,17 +645,107 @@ async def force_update(interaction: discord.Interaction):
         logger.error(f"Error in force_update: {e}")
         await interaction.followup.send("❌ Error forcing update. Check logs for details.")
 
-@bot.command()
-@commands.is_owner()  # Only bot owner can use this
-async def sync_commands(ctx):
+@bot.tree.command(
+    name="sync",
+    description="Sync all slash commands (Admin only)"
+)
+@app_commands.default_permissions(administrator=True)
+async def sync_slash_commands(interaction: discord.Interaction):
     """Sync all slash commands"""
+    await interaction.response.defer()
+    
     try:
         synced = await bot.tree.sync()
-        await ctx.send(f"Synced {len(synced)} commands!")
+        await interaction.followup.send(
+            f"✅ Successfully synced {len(synced)} commands!\n"
+            "All commands should now be available."
+        )
         logger.info(f"Manually synced {len(synced)} commands")
     except Exception as e:
         logger.error(f"Error syncing commands: {e}")
-        await ctx.send("Failed to sync commands!")
+        await interaction.followup.send("❌ Failed to sync commands!")
+
+@bot.tree.command(
+    name="setup",
+    description="Setup bot configuration and display channels"
+)
+@app_commands.describe(
+    config_channel="Channel for bot configuration commands",
+    display_channel="Channel where price updates will be shown"
+)
+@app_commands.default_permissions(administrator=True)
+async def setup(
+    interaction: discord.Interaction,
+    config_channel: discord.TextChannel,
+    display_channel: discord.TextChannel
+):
+    """Setup bot configuration"""
+    await interaction.response.defer()
+    
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        tracked_guilds[guild_id] = GuildConfig(guild_id)
+    
+    config = tracked_guilds[guild_id]
+    
+    # Save channel IDs
+    config.config_channel_id = config_channel.id
+    config.display_channel_id = display_channel.id
+    save_tracked_guilds()
+    
+    # Create setup message
+    embed = discord.Embed(
+        title="🔧 Bot Setup",
+        description="Configure the bot by using these commands:",
+        color=discord.Color.blue()
+    )
+    
+    embed.add_field(
+        name="1️⃣ Add Tokens",
+        value="`/add_token [token_id]` - Add tokens to track\n"
+              "Example: `/add_token bitcoin`",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="2️⃣ Set Update Interval",
+        value="`/set_interval [seconds]` - Set how often prices update\n"
+              "Example: `/set_interval 300` for 5 minutes",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📊 Display Channel",
+        value=f"Price updates will be shown in {display_channel.mention}",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="⚙️ Config Channel",
+        value=f"Use commands in {config_channel.mention}",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="Other Commands",
+        value="`/list_tokens` - Show tracked tokens\n"
+              "`/remove_token [symbol]` - Stop tracking a token\n"
+              "`/status` - Check bot status\n"
+              "`/force_update` - Force immediate update",
+        inline=False
+    )
+    
+    # Send setup guide to config channel
+    try:
+        await config_channel.send(embed=embed)
+        await interaction.followup.send(
+            f"✅ Setup complete! Check {config_channel.mention} for configuration instructions."
+        )
+    except Exception as e:
+        logger.error(f"Error sending setup message: {e}")
+        await interaction.followup.send(
+            "❌ Error: Make sure the bot has permission to send messages in the configured channels."
+        )
 
 def run_bot():
     """Run the bot"""

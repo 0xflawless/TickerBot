@@ -2,10 +2,12 @@
     "956307382919647292": {
         "is_tracking": true,
         "update_interval": 60,
+        "config_channel_id": 986393724256936027,
+        "display_channel_id": 986393724256936027,
         "tokens": {
-            "echelon-prime": {
-                "symbol": "PRIME",
-                "last_price": 10.15
+            "paragonsdao": {
+                "symbol": "PDT",
+                "last_price": 0.098919
             }
         }
     }
