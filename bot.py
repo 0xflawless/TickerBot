@@ -759,86 +759,9 @@ async def setup(
             "❌ Error: Make sure the bot has permission to send messages in the configured channels."
         )
 
-class PriceBot(commands.Bot):
-    def __init__(self, token_id: str, token_symbol: str, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.token_id = token_id
-        self.token_symbol = token_symbol
-        self.last_price = 0
-
-class MultiBot:
-    def __init__(self):
-        self.bots = []
-        
-        # Create a bot instance for each token
-        tokens = [
-            (os.getenv(f'BOT_TOKEN_{i}'), f'BOT_{i}') 
-            for i in range(1, 10)  # Support up to 9 bots
-            if os.getenv(f'BOT_TOKEN_{i}')
-        ]
-        
-        for token, name in tokens:
-            intents = discord.Intents.default()
-            intents.message_content = True
-            bot = PriceBot(
-                token_id="",  # Will be set when adding token
-                token_symbol="",
-                command_prefix='!',
-                intents=intents
-            )
-            self.bots.append((bot, token))
-
-    async def start_all(self):
-        """Start all bot instances"""
-        for bot, token in self.bots:
-            try:
-                await bot.start(token)
-            except Exception as e:
-                logger.error(f"Failed to start bot: {e}")
-
-    def run_all(self):
-        """Run all bots concurrently"""
-        async def runner():
-            await self.start_all()
-            
-        asyncio.run(runner())
-
 def run_bot():
     """Run the bot"""
     bot.run(TOKEN)
 
-async def update_single_bot_price(bot: PriceBot):
-    """Update price for a single bot instance"""
-    try:
-        current_price, change_24h = await fetch_token_price_with_24h(bot.token_id)
-        if current_price is None:
-            return
-
-        # Get trend indicator
-        trend = get_trend_indicator(current_price, bot.last_price, change_24h)
-        
-        # Update nickname with price
-        nick = f"{bot.token_symbol}: ${current_price:.4f} {trend}"
-        
-        # Update status with 24h change
-        status = f"24h: {change_24h:+.1f}%" if change_24h is not None else ""
-        
-        for guild in bot.guilds:
-            try:
-                await guild.me.edit(nick=nick)
-                await bot.change_presence(
-                    activity=discord.Activity(
-                        type=discord.ActivityType.watching,
-                        name=status
-                    )
-                )
-            except Exception as e:
-                logger.error(f"Error updating bot in guild {guild.id}: {e}")
-        
-        bot.last_price = current_price
-    except Exception as e:
-        logger.error(f"Error updating bot price: {e}")
-
 if __name__ == "__main__":
-    multi_bot = MultiBot()
-    multi_bot.run_all() 
+    run_bot() 
