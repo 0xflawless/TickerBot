@@ -195,25 +195,27 @@ async def update_price_info():
     """Update bot nicknames for all tracked tokens"""
     try:
         current_time = int(time.time())
-        guilds_to_remove = []
+        logger.info("Running price update check...")  # Add logging
         
         for guild_id, config in tracked_guilds.items():
             try:
                 if not config.is_tracking:
+                    logger.debug(f"Guild {guild_id} is not tracking")
                     continue
                 
                 if not hasattr(config, 'last_update_time'):
                     config.last_update_time = 0
                 
                 if current_time - config.last_update_time < config.update_interval:
+                    logger.debug(f"Skipping update for guild {guild_id}, next update in {config.update_interval - (current_time - config.last_update_time)} seconds")
                     continue
                 
                 guild = bot.get_guild(guild_id)
                 if not guild:
                     logger.warning(f"Could not find guild {guild_id}")
-                    guilds_to_remove.append(guild_id)
                     continue
                 
+                logger.info(f"Updating prices for guild {guild.name} ({guild_id})")  # Add logging
                 config.last_update_time = current_time
                 
                 # Collect all price information first
@@ -222,6 +224,7 @@ async def update_price_info():
                     try:
                         current_price, change_24h = await fetch_token_price_with_24h(token_id)
                         if current_price is None:
+                            logger.warning(f"Could not fetch price for {token_config.token_symbol}")
                             continue
 
                         # Get trend indicator
@@ -234,6 +237,7 @@ async def update_price_info():
                         else:
                             price_str += f" {trend}"
                         
+                        logger.info(f"Price update for {token_config.token_symbol}: {price_str}")  # Add logging
                         status_parts.append(price_str)
                         token_config.last_price = current_price
 
@@ -246,15 +250,15 @@ async def update_price_info():
                     try:
                         nick = " | ".join(status_parts)
                         if len(nick) > 32:
-                            # Try to make a more intelligent truncation
                             max_tokens = len(status_parts)
                             while max_tokens > 0:
                                 nick = " | ".join(status_parts[:max_tokens])
-                                if len(nick) <= 29:  # Leave room for "..."
+                                if len(nick) <= 29:
                                     break
                                 max_tokens -= 1
                             nick = nick[:29] + "..." if len(nick) > 32 else nick
                         
+                        logger.info(f"Updating nickname in {guild.name} to: {nick}")  # Add logging
                         await guild.me.edit(nick=nick)
                     except Exception as e:
                         logger.error(f"Error updating nickname: {e}")
@@ -263,17 +267,8 @@ async def update_price_info():
                 logger.error(f"Error updating guild {guild_id}: {e}")
                 continue
 
-        # Clean up removed guilds
-        for guild_id in guilds_to_remove:
-            del tracked_guilds[guild_id]
-            save_tracked_guilds()
-
     except Exception as e:
         logger.error(f"Critical error in update task: {e}")
-    finally:
-        # Ensure the task keeps running even if there's an error
-        if not update_price_info.is_running():
-            update_price_info.start()
 
 @bot.event
 async def on_ready():
@@ -281,9 +276,27 @@ async def on_ready():
     logger.info(f'{bot.user} has connected to Discord!')
     try:
         load_tracked_guilds()
+        
+        # Force sync all commands
+        logger.info("Syncing commands...")
         synced = await bot.tree.sync()
-        logger.info(f"Synced {len(synced)} command(s)")
+        logger.info(f"Synced {len(synced)} commands")
+        
+        # Stop the task if it's running
+        if update_price_info.is_running():
+            update_price_info.stop()
+        
+        # Start the task
         update_price_info.start()
+        logger.info("Price update task started")
+        
+        # Log currently tracked guilds and tokens
+        for guild_id, config in tracked_guilds.items():
+            guild = bot.get_guild(guild_id)
+            guild_name = guild.name if guild else "Unknown Guild"
+            logger.info(f"Tracking in {guild_name} ({guild_id}):")
+            for token_id, token_config in config.tokens.items():
+                logger.info(f"- {token_config.token_symbol} ({token_id})")
     except Exception as e:
         logger.error(f"Error in on_ready: {e}")
 
@@ -563,6 +576,47 @@ async def on_guild_remove(guild):
             logger.info(f"Cleaned up tracking for removed guild {guild.id}")
     except Exception as e:
         logger.error(f"Error cleaning up removed guild {guild.id}: {e}")
+
+@bot.tree.command(
+    name="force_update",
+    description="Force an immediate price update"
+)
+@app_commands.default_permissions(administrator=True)
+async def force_update(interaction: discord.Interaction):
+    """Force an immediate price update"""
+    await interaction.response.defer()
+    
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        await interaction.followup.send("No tokens are being tracked in this server.")
+        return
+    
+    config = tracked_guilds[guild_id]
+    if not config.tokens:
+        await interaction.followup.send("No tokens are being tracked in this server.")
+        return
+    
+    try:
+        # Reset the last update time to force an update
+        config.last_update_time = 0
+        # Run the update
+        await update_price_info()
+        await interaction.followup.send("✅ Forced price update completed!")
+    except Exception as e:
+        logger.error(f"Error in force_update: {e}")
+        await interaction.followup.send("❌ Error forcing update. Check logs for details.")
+
+@bot.command()
+@commands.is_owner()  # Only bot owner can use this
+async def sync_commands(ctx):
+    """Sync all slash commands"""
+    try:
+        synced = await bot.tree.sync()
+        await ctx.send(f"Synced {len(synced)} commands!")
+        logger.info(f"Manually synced {len(synced)} commands")
+    except Exception as e:
+        logger.error(f"Error syncing commands: {e}")
+        await ctx.send("Failed to sync commands!")
 
 def run_bot():
     """Run the bot"""
