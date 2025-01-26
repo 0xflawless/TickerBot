@@ -195,7 +195,7 @@ async def update_price_info():
     """Update bot nicknames for all tracked tokens"""
     try:
         current_time = int(time.time())
-        logger.info("Running price update check...")  # Add logging
+        logger.info("Running price update check...")
         
         for guild_id, config in tracked_guilds.items():
             try:
@@ -215,11 +215,12 @@ async def update_price_info():
                     logger.warning(f"Could not find guild {guild_id}")
                     continue
                 
-                logger.info(f"Updating prices for guild {guild.name} ({guild_id})")  # Add logging
+                logger.info(f"Updating prices for guild {guild.name} ({guild_id})")
                 config.last_update_time = current_time
                 
                 # Collect all price information first
                 status_parts = []
+                watching_parts = []  # New list for watching status
                 for token_id, token_config in config.tokens.items():
                     try:
                         current_price, change_24h = await fetch_token_price_with_24h(token_id)
@@ -230,22 +231,22 @@ async def update_price_info():
                         # Get trend indicator
                         trend = get_trend_indicator(current_price, token_config.last_price, change_24h)
                         
-                        # Format price display
-                        price_str = f"{token_config.token_symbol}: ${current_price:.4f}"
-                        if change_24h is not None:
-                            price_str += f" ({change_24h:+.1f}%) {trend}"
-                        else:
-                            price_str += f" {trend}"
-                        
-                        logger.info(f"Price update for {token_config.token_symbol}: {price_str}")  # Add logging
+                        # Format price display (without 24h change)
+                        price_str = f"{token_config.token_symbol}: ${current_price:.4f} {trend}"
                         status_parts.append(price_str)
+                        
+                        # Add 24h change to watching status
+                        if change_24h is not None:
+                            watching_str = f"24h: {change_24h:+.1f}%"
+                            watching_parts.append(watching_str)
+                        
                         token_config.last_price = current_price
 
                     except Exception as e:
                         logger.error(f"Error processing token {token_id}: {e}")
                         continue
 
-                # Update bot nickname with all prices
+                # Update bot nickname with prices
                 if status_parts:
                     try:
                         nick = " | ".join(status_parts)
@@ -258,10 +259,20 @@ async def update_price_info():
                                 max_tokens -= 1
                             nick = nick[:29] + "..." if len(nick) > 32 else nick
                         
-                        logger.info(f"Updating nickname in {guild.name} to: {nick}")  # Add logging
+                        logger.info(f"Updating nickname in {guild.name} to: {nick}")
                         await guild.me.edit(nick=nick)
+                        
+                        # Set watching status with 24h changes
+                        if watching_parts:
+                            watching_status = " | ".join(watching_parts)
+                            await bot.change_presence(
+                                activity=discord.Activity(
+                                    type=discord.ActivityType.watching,
+                                    name=watching_status
+                                )
+                            )
                     except Exception as e:
-                        logger.error(f"Error updating nickname: {e}")
+                        logger.error(f"Error updating display: {e}")
 
             except Exception as e:
                 logger.error(f"Error updating guild {guild_id}: {e}")
