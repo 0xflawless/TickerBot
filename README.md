@@ -39,6 +39,7 @@ All commands use Discord's slash command system (/).
      - Administrator (for admin commands)
 
 2. **Installation**
+   Option 1: Using pip
    ```bash
    # Clone the repository
    git clone https://github.com/yourusername/crypto-price-tracker.git
@@ -46,6 +47,22 @@ All commands use Discord's slash command system (/).
 
    # Install requirements
    pip install -r requirements.txt
+   ```
+   
+   Option 2: Using Poetry (Recommended)
+   ```bash
+   # Install Poetry if you haven't already
+   curl -sSL https://install.python-poetry.org | python3 -
+   
+   # Clone the repository
+   git clone https://github.com/yourusername/crypto-price-tracker.git
+   cd crypto-price-tracker
+   
+   # Install dependencies using Poetry
+   poetry install
+   
+   # Run the bot
+   poetry run bot
    ```
 
 3. **Configuration**
@@ -110,3 +127,62 @@ If you encounter any issues or need help:
 2. Ensure the bot has proper permissions
 3. Verify you have Administrator permission for admin commands
 4. Verify the token ID exists on CoinGecko
+
+## Deployment Options
+
+### Local Hosting
+Run the bot locally using the instructions in the Setup section above.
+
+### Railway Deployment (Recommended for 24/7 Uptime)
+
+Railway.app provides an easy way to deploy and host the bot with automatic updates and 24/7 uptime.
+
+1. **Prerequisites**
+   - A GitHub account
+   - A Railway.app account (sign up at [Railway.app](https://railway.app) using GitHub)
+
+2. **Deployment Steps**
+   ```bash
+   # 1. Fork this repository to your GitHub account
+   # 2. Go to Railway.app and sign in with GitHub
+   # 3. Click "New Project"
+   # 4. Select "Deploy from GitHub repo"
+   # 5. Choose your forked repository
+   ```
+
+3. **Environment Setup**
+   - In your Railway project, go to the "Variables" tab
+   - Add these environment variables:
+   ```env
+   DISCORD_TOKEN=your_discord_bot_token
+   DEBUG=0  # Set to 1 for debug logging
+   ```
+
+4. **Automatic Deployment**
+   - Railway will automatically:
+     - Detect the Python environment
+     - Install dependencies from requirements.txt
+     - Start the bot using the Procfile
+     - Handle all future updates when you push to GitHub
+
+5. **Monitoring**
+   - Use Railway's dashboard to:
+     - Monitor bot status
+     - View logs
+     - Check resource usage
+     - Set up alerts
+
+### Railway Features
+- 🔄 Automatic deployments
+- 📊 Resource monitoring
+- 🔍 Live logs
+- ⚡ High availability
+- 🛡️ SSL/HTTPS enabled
+- 🔒 Secure environment variables
+
+### Railway Troubleshooting
+- If deployment fails, check:
+  1. Procfile exists and contains: `worker: python bot.py`
+  2. requirements.txt includes all dependencies
+  3. Environment variables are set correctly
+- View deployment logs in Railway dashboard for specific errors

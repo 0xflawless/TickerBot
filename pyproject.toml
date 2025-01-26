@@ -1,0 +1,24 @@
+[tool.poetry]
+name = "crypto-price-tracker-bot"
+version = "1.0.0"
+description = "A Discord bot that tracks cryptocurrency prices from CoinGecko"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "."}]
+
+[tool.poetry.dependencies]
+python = "^3.8"
+"discord.py" = "^2.3.2"
+python-dotenv = "^1.0.0"
+aiohttp = "^3.9.1"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.urls]
+"Homepage" = "https://github.com/yourusername/crypto-price-tracker"
+"Bug Tracker" = "https://github.com/yourusername/crypto-price-tracker/issues"
+
+[tool.poetry.scripts]
+bot = "bot:run_bot" 
