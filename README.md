@@ -98,7 +98,36 @@ To track multiple tokens:
 - Verify CoinGecko API status with `/status`
 
 ## Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
+We welcome contributions that improve the bot's functionality and reliability. However, as this is a commercial product:
+
+1. Please contact us before starting work on significant changes
+2. All contributions must be reviewed and approved by our team
+3. Contributors agree to transfer ownership of their code to our organization
+4. We may decline contributions that don't align with our product vision
+
+To contribute:
+1. Open an issue describing your proposed change
+2. Wait for approval from our team
+3. Fork the repository and create your changes
+4. Submit a pull request referencing the issue
 
 ## License
-This project is licensed under the MIT License - see the LICENSE file for details.
+© 2024 Your Company Name. All rights reserved.
+
+This software is provided under a proprietary license. Usage is subject to the following restrictions:
+
+1. **Usage Restrictions**
+   - Commercial use requires explicit written permission
+   - No redistribution without authorization
+   - No creation of derivative works without approval
+
+2. **Permissions**
+   - Private installation and use
+   - Code viewing for security auditing
+   - Bug reporting and fixes
+
+3. **Requirements**
+   - Maintain all copyright notices
+   - Include original license text
+
+For licensing inquiries or permissions beyond these restrictions, please contact: your@email.com
