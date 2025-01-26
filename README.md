@@ -139,4 +139,4 @@ This software is provided under a proprietary license. Usage is subject to the f
    - Maintain all copyright notices
    - Include original license text
 
-For licensing inquiries or permissions beyond these restrictions, please contact: your@email.com
+For licensing inquiries or permissions beyond these restrictions, please contact: timm@servicedao.com
