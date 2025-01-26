@@ -112,11 +112,13 @@ To contribute:
 4. Submit a pull request referencing the issue
 
 ## License
-© 2024 Your Company Name. All rights reserved.
+© 2024 [@L3VEL7](https://github.com/L3VEL7/). All rights reserved.
 
 This software is provided under a proprietary license. Usage is subject to the following restrictions:
 
 1. **Usage Restrictions**
+   - Personal use is permitted (single instance for personal Discord servers)
+   - Project/Business use requires explicit written permission
    - Commercial use requires explicit written permission
    - No redistribution without authorization
    - No creation of derivative works without approval
@@ -126,7 +128,14 @@ This software is provided under a proprietary license. Usage is subject to the f
    - Code viewing for security auditing
    - Bug reporting and fixes
 
-3. **Requirements**
+3. **Personal Use**
+   - You may run one instance for your personal Discord server
+   - You may not use this bot for:
+     - Commercial projects or businesses
+     - Public bot services
+     - Multiple instance deployments without permission
+
+4. **Requirements**
    - Maintain all copyright notices
    - Include original license text
 
