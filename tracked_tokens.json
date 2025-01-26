@@ -7,8 +7,15 @@
         "tokens": {
             "paragonsdao": {
                 "symbol": "PDT",
-                "last_price": 0.098919
+                "last_price": 0.098607
             }
         }
+    },
+    "1215080426020798514": {
+        "is_tracking": false,
+        "update_interval": 60,
+        "config_channel_id": null,
+        "display_channel_id": null,
+        "tokens": {}
     }
 }

@@ -222,20 +222,15 @@ async def update_price_info():
                     logger.debug(f"Guild {guild_id} is not tracking")
                     continue
                 
-                if not hasattr(config, 'last_update_time'):
-                    config.last_update_time = 0
-                
-                if current_time - config.last_update_time < config.update_interval:
-                    logger.debug(f"Skipping update for guild {guild_id}")
-                    continue
-                
                 guild = bot.get_guild(guild_id)
                 if not guild:
                     logger.warning(f"Could not find guild {guild_id}")
                     continue
                 
-                logger.info(f"Updating prices for guild {guild.name} ({guild_id})")
-                config.last_update_time = current_time
+                logger.debug(f"Processing guild: {guild.name} ({guild_id})")
+                
+                # Reset all_24h_changes for each guild
+                all_24h_changes = []  # Move this here to reset for each guild
                 
                 # Collect all price information first
                 status_parts = []
@@ -245,6 +240,8 @@ async def update_price_info():
                         if current_price is None:
                             continue
 
+                        logger.debug(f"Got price for {token_config.token_symbol}: ${current_price:.4f}, 24h: {change_24h:+.1f}%")
+                        
                         # Get trend indicator
                         trend = get_trend_indicator(current_price, token_config.last_price, change_24h)
                         
@@ -252,7 +249,7 @@ async def update_price_info():
                         price_str = f"{token_config.token_symbol}: ${current_price:.4f} {trend}"
                         status_parts.append(price_str)
                         
-                        # Track 24h change for global status
+                        # Track 24h change for this guild's status
                         if change_24h is not None:
                             all_24h_changes.append((token_config.token_symbol, change_24h))
                         
@@ -275,30 +272,26 @@ async def update_price_info():
                                 max_tokens -= 1
                             nick = nick[:29] + "..." if len(nick) > 32 else nick
                         
-                        logger.info(f"Updating nickname in {guild.name} to: {nick}")
+                        logger.debug(f"Setting nickname in {guild.name} to: {nick}")
                         await guild.me.edit(nick=nick)
+                        
+                        # Update status for this guild's token only
+                        if all_24h_changes:
+                            symbol, change = all_24h_changes[0]  # Get first (and only) token
+                            status = f"24h: {symbol} {change:+.1f}%"
+                            logger.debug(f"Setting status in {guild.name} to: {status}")
+                            await bot.change_presence(
+                                activity=discord.Activity(
+                                    type=discord.ActivityType.watching,
+                                    name=status
+                                )
+                            )
                     except Exception as e:
-                        logger.error(f"Error updating nickname: {e}")
+                        logger.error(f"Error updating display in {guild.name}: {e}")
 
             except Exception as e:
                 logger.error(f"Error updating guild {guild_id}: {e}")
                 continue
-
-        # Update global status with 24h changes
-        if all_24h_changes:
-            try:
-                # Format like: "24h: PRIME +5.2%"
-                changes = [f"{symbol} {change:+.1f}%" for symbol, change in all_24h_changes]
-                status = "24h: " + " | ".join(changes)
-                
-                await bot.change_presence(
-                    activity=discord.Activity(
-                        type=discord.ActivityType.watching,
-                        name=status
-                    )
-                )
-            except Exception as e:
-                logger.error(f"Error updating status: {e}")
 
     except Exception as e:
         logger.error(f"Critical error in update task: {e}")
@@ -525,7 +518,7 @@ async def check_status(interaction: discord.Interaction):
         inline=False
     )
     
-    # Add guild statistics and update interval
+    # Add guild-specific information
     guild_id = interaction.guild_id
     if guild_id in tracked_guilds:
         config = tracked_guilds[guild_id]
@@ -536,22 +529,34 @@ async def check_status(interaction: discord.Interaction):
             interval_str = f"{interval_seconds / 60:.1f} minutes"
         else:
             interval_str = f"{interval_seconds} seconds"
+        
+        # Show tokens tracked in this server
+        tokens_in_server = len(config.tokens)
+        token_list = ", ".join(token_config.token_symbol for token_config in config.tokens.values())
     else:
         interval_str = "5 minutes (default)"
+        tokens_in_server = 0
+        token_list = "None"
     
     embed.add_field(
         name="Server Settings",
-        value=f"Update Interval: {interval_str}",
+        value=f"Update Interval: {interval_str}\n"
+              f"Tokens in this server: {token_list}",
         inline=False
     )
     
-    # Add global statistics
+    # Add global statistics (count unique tokens)
     total_guilds = len(tracked_guilds)
-    total_tokens = sum(len(config.tokens) for config in tracked_guilds.values())
+    unique_tokens = {
+        token_config.token_symbol 
+        for guild in tracked_guilds.values() 
+        for token_config in guild.tokens.values()
+    }
     
     embed.add_field(
-        name="Statistics",
-        value=f"Servers: {total_guilds}\nTotal tokens tracked: {total_tokens}",
+        name="Global Statistics",
+        value=f"Total Servers: {total_guilds}\n"
+              f"Unique Tokens Tracked: {len(unique_tokens)}",
         inline=False
     )
     
