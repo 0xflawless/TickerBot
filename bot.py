@@ -187,10 +187,10 @@ async def fetch_token_price_with_24h(token_id: str, retry_count=0):
 def get_trend_indicator(price: float, last_price: float, change_24h: float) -> str:
     """Get trend indicator based on price movement"""
     if price > last_price:
-        return "↗️"  # Up trend
+        return "📈"  # Up trend (chart_with_upwards_trend)
     elif price < last_price:
-        return "↘️"  # Down trend
-    return "➡️"  # Sideways
+        return "📉"  # Down trend (chart_with_downwards_trend)
+    return "➡️"  # Sideways (still keep this for no change)
 
 async def create_or_get_role(guild: discord.Guild, name: str, reason: str) -> discord.Role:
     """Create or get a role with the given name"""
@@ -340,7 +340,25 @@ async def add_token(interaction: discord.Interaction, token_id: str):
     """Add a token to track"""
     await interaction.response.defer()
     
-    # Verify token exists on CoinGecko
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        tracked_guilds[guild_id] = GuildConfig(guild_id)
+    
+    config = tracked_guilds[guild_id]
+    
+    # Check if any token is already being tracked
+    if config.tokens:
+        await interaction.followup.send(
+            "⚠️ **Only one token can be tracked per bot instance!**\n\n"
+            "To track multiple tokens, you need to:\n"
+            "1. Create additional bot applications in Discord Developer Portal\n"
+            "2. Get tokens for each bot\n"
+            "3. Run separate instances of the bot with different tokens\n\n"
+            "See the README.md for instructions on setting up multiple bots."
+        )
+        return
+
+    # Rest of the add_token function remains the same...
     token_symbol, valid = await verify_token_id(token_id)
     if not valid:
         await interaction.followup.send(
@@ -348,12 +366,6 @@ async def add_token(interaction: discord.Interaction, token_id: str):
             "Example: For Bitcoin use 'bitcoin', for Ethereum use 'ethereum'"
         )
         return
-
-    guild_id = interaction.guild_id
-    if guild_id not in tracked_guilds:
-        tracked_guilds[guild_id] = GuildConfig(guild_id)
-    
-    config = tracked_guilds[guild_id]
     
     if token_id in config.tokens:
         await interaction.followup.send(f"⚠️ {token_symbol} is already being tracked!")
@@ -361,7 +373,7 @@ async def add_token(interaction: discord.Interaction, token_id: str):
         
     config.tokens[token_id] = TokenConfig(token_id, token_symbol)
     config.is_tracking = True
-    save_tracked_guilds()  # Save after adding token
+    save_tracked_guilds()
     
     # Test price fetch
     price = await fetch_token_price(token_id)
@@ -747,9 +759,86 @@ async def setup(
             "❌ Error: Make sure the bot has permission to send messages in the configured channels."
         )
 
+class PriceBot(commands.Bot):
+    def __init__(self, token_id: str, token_symbol: str, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.token_id = token_id
+        self.token_symbol = token_symbol
+        self.last_price = 0
+
+class MultiBot:
+    def __init__(self):
+        self.bots = []
+        
+        # Create a bot instance for each token
+        tokens = [
+            (os.getenv(f'BOT_TOKEN_{i}'), f'BOT_{i}') 
+            for i in range(1, 10)  # Support up to 9 bots
+            if os.getenv(f'BOT_TOKEN_{i}')
+        ]
+        
+        for token, name in tokens:
+            intents = discord.Intents.default()
+            intents.message_content = True
+            bot = PriceBot(
+                token_id="",  # Will be set when adding token
+                token_symbol="",
+                command_prefix='!',
+                intents=intents
+            )
+            self.bots.append((bot, token))
+
+    async def start_all(self):
+        """Start all bot instances"""
+        for bot, token in self.bots:
+            try:
+                await bot.start(token)
+            except Exception as e:
+                logger.error(f"Failed to start bot: {e}")
+
+    def run_all(self):
+        """Run all bots concurrently"""
+        async def runner():
+            await self.start_all()
+            
+        asyncio.run(runner())
+
 def run_bot():
     """Run the bot"""
     bot.run(TOKEN)
 
+async def update_single_bot_price(bot: PriceBot):
+    """Update price for a single bot instance"""
+    try:
+        current_price, change_24h = await fetch_token_price_with_24h(bot.token_id)
+        if current_price is None:
+            return
+
+        # Get trend indicator
+        trend = get_trend_indicator(current_price, bot.last_price, change_24h)
+        
+        # Update nickname with price
+        nick = f"{bot.token_symbol}: ${current_price:.4f} {trend}"
+        
+        # Update status with 24h change
+        status = f"24h: {change_24h:+.1f}%" if change_24h is not None else ""
+        
+        for guild in bot.guilds:
+            try:
+                await guild.me.edit(nick=nick)
+                await bot.change_presence(
+                    activity=discord.Activity(
+                        type=discord.ActivityType.watching,
+                        name=status
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error updating bot in guild {guild.id}: {e}")
+        
+        bot.last_price = current_price
+    except Exception as e:
+        logger.error(f"Error updating bot price: {e}")
+
 if __name__ == "__main__":
-    run_bot() 
+    multi_bot = MultiBot()
+    multi_bot.run_all() 
