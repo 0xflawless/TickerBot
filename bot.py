@@ -197,6 +197,9 @@ async def update_price_info():
         current_time = int(time.time())
         logger.info("Running price update check...")
         
+        # Track 24h changes across all guilds for status
+        all_24h_changes = []
+        
         for guild_id, config in tracked_guilds.items():
             try:
                 if not config.is_tracking:
@@ -220,12 +223,10 @@ async def update_price_info():
                 
                 # Collect all price information first
                 status_parts = []
-                watching_parts = []  # New list for watching status
                 for token_id, token_config in config.tokens.items():
                     try:
                         current_price, change_24h = await fetch_token_price_with_24h(token_id)
                         if current_price is None:
-                            logger.warning(f"Could not fetch price for {token_config.token_symbol}")
                             continue
 
                         # Get trend indicator
@@ -235,10 +236,9 @@ async def update_price_info():
                         price_str = f"{token_config.token_symbol}: ${current_price:.4f} {trend}"
                         status_parts.append(price_str)
                         
-                        # Add 24h change to watching status
+                        # Track 24h change for status
                         if change_24h is not None:
-                            watching_str = f"24h: {change_24h:+.1f}%"
-                            watching_parts.append(watching_str)
+                            all_24h_changes.append((token_config.token_symbol, change_24h))
                         
                         token_config.last_price = current_price
 
@@ -261,22 +261,28 @@ async def update_price_info():
                         
                         logger.info(f"Updating nickname in {guild.name} to: {nick}")
                         await guild.me.edit(nick=nick)
-                        
-                        # Set watching status with 24h changes
-                        if watching_parts:
-                            watching_status = " | ".join(watching_parts)
-                            await bot.change_presence(
-                                activity=discord.Activity(
-                                    type=discord.ActivityType.watching,
-                                    name=watching_status
-                                )
-                            )
                     except Exception as e:
-                        logger.error(f"Error updating display: {e}")
+                        logger.error(f"Error updating nickname: {e}")
 
             except Exception as e:
                 logger.error(f"Error updating guild {guild_id}: {e}")
                 continue
+
+        # Update global status with 24h changes
+        if all_24h_changes:
+            try:
+                # Format like: "watching 24h: BTC +5.2% | ETH -2.1%"
+                changes = [f"{symbol} {change:+.1f}%" for symbol, change in all_24h_changes]
+                status = "24h: " + " | ".join(changes)
+                
+                await bot.change_presence(
+                    activity=discord.Activity(
+                        type=discord.ActivityType.watching,
+                        name=status
+                    )
+                )
+            except Exception as e:
+                logger.error(f"Error updating status: {e}")
 
     except Exception as e:
         logger.error(f"Critical error in update task: {e}")
