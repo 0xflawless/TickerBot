@@ -74,10 +74,9 @@ class TokenConfig:
     def __init__(self, token_id: str, token_symbol: str):
         self.token_id = token_id
         self.token_symbol = token_symbol
-        self.price_role = None
         self.last_price = 0
         self.price_24h_ago = 0
-        self.last_24h_update = 0  # timestamp of last 24h price update
+        self.last_24h_update = 0
 
 class GuildConfig:
     def __init__(self, guild_id):
@@ -194,7 +193,7 @@ def get_trend_indicator(price: float, last_price: float, change_24h: float) -> s
 
 @tasks.loop(seconds=60)
 async def update_price_info():
-    """Update bot's nickname and role colors for all tracked tokens"""
+    """Update bot nicknames for all tracked tokens"""
     try:
         current_time = int(time.time())
         guilds_to_remove = []
@@ -212,13 +211,14 @@ async def update_price_info():
                 
                 guild = bot.get_guild(guild_id)
                 if not guild:
-                    logger.warning(f"Could not find guild {guild_id}, will remove from tracking")
+                    logger.warning(f"Could not find guild {guild_id}")
                     guilds_to_remove.append(guild_id)
                     continue
                 
                 config.last_update_time = current_time
-                status_parts = []
                 
+                # Collect all price information first
+                status_parts = []
                 for token_id, token_config in config.tokens.items():
                     try:
                         current_price, change_24h = await fetch_token_price_with_24h(token_id)
@@ -228,7 +228,7 @@ async def update_price_info():
                         # Get trend indicator
                         trend = get_trend_indicator(current_price, token_config.last_price, change_24h)
                         
-                        # Format price with trend and 24h change
+                        # Format price display
                         price_str = f"{token_config.token_symbol}: ${current_price:.4f}"
                         if change_24h is not None:
                             price_str += f" ({change_24h:+.1f}%) {trend}"
@@ -236,44 +236,26 @@ async def update_price_info():
                             price_str += f" {trend}"
                         
                         status_parts.append(price_str)
-
-                        # Update role color based on 24h change
-                        try:
-                            if not token_config.price_role:
-                                role_name = f"{token_config.token_symbol} Price"
-                                token_config.price_role = discord.utils.get(guild.roles, name=role_name)
-                                if not token_config.price_role:
-                                    token_config.price_role = await guild.create_role(name=role_name)
-
-                            # Use 24h change for role color if available
-                            if change_24h is not None:
-                                new_color = discord.Color.green() if change_24h > 0 else discord.Color.red()
-                            else:
-                                new_color = discord.Color.green() if current_price > token_config.last_price else discord.Color.red()
-                            
-                            await token_config.price_role.edit(color=new_color)
-                        except Exception as e:
-                            logger.error(f"Error updating role: {e}")
-
                         token_config.last_price = current_price
 
                     except Exception as e:
                         logger.error(f"Error processing token {token_id}: {e}")
                         continue
 
-                # Update bot nickname
+                # Update bot nickname with all prices
                 if status_parts:
                     try:
                         nick = " | ".join(status_parts)
                         if len(nick) > 32:
-                            # Intelligent truncation
+                            # Try to make a more intelligent truncation
                             max_tokens = len(status_parts)
                             while max_tokens > 0:
                                 nick = " | ".join(status_parts[:max_tokens])
-                                if len(nick) <= 29:
+                                if len(nick) <= 29:  # Leave room for "..."
                                     break
                                 max_tokens -= 1
-                            nick = nick[:29] + "..."
+                            nick = nick[:29] + "..." if len(nick) > 32 else nick
+                        
                         await guild.me.edit(nick=nick)
                     except Exception as e:
                         logger.error(f"Error updating nickname: {e}")
@@ -351,9 +333,7 @@ async def add_token(interaction: discord.Interaction, token_id: str):
             "The bot will retry in the next update cycle."
         )
 
-@bot.tree.command(name="remove_token", description="Remove a token from tracking")
-@app_commands.describe(token_symbol="Token symbol (e.g., 'BTC' or 'ETH')")
-@app_commands.default_permissions(administrator=True)
+@bot.tree.command(name="remove_token")
 async def remove_token(interaction: discord.Interaction, token_symbol: str):
     """Remove a token from tracking"""
     guild_id = interaction.guild_id
@@ -372,16 +352,8 @@ async def remove_token(interaction: discord.Interaction, token_symbol: str):
             break
     
     if token_id_to_remove:
-        # Remove the role if it exists
-        token_config = config.tokens[token_id_to_remove]
-        if token_config.price_role:
-            try:
-                await token_config.price_role.delete()
-            except Exception as e:
-                logger.error(f"Error deleting role: {e}")
-        
         del config.tokens[token_id_to_remove]
-        save_tracked_guilds()  # Save after removing token
+        save_tracked_guilds()
         await interaction.response.send_message(f"✅ Removed {token_symbol} from tracking.")
         
         if not config.tokens:
@@ -413,36 +385,6 @@ async def list_tokens(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-async def cleanup_guild_roles(guild: discord.Guild):
-    """Clean up orphaned price roles"""
-    try:
-        price_roles = [r for r in guild.roles if r.name.endswith(" Price")]
-        for role in price_roles:
-            token_symbol = role.name.replace(" Price", "")
-            is_active = False
-            if guild.id in tracked_guilds:
-                for token_config in tracked_guilds[guild.id].tokens.values():
-                    if token_config.token_symbol == token_symbol:
-                        is_active = True
-                        break
-            
-            if not is_active:
-                try:
-                    await role.delete()
-                    logger.info(f"Cleaned up orphaned role {role.name}")
-                except Exception as e:
-                    logger.error(f"Error cleaning up role {role.name}: {e}")
-    except Exception as e:
-        logger.error(f"Error in cleanup_guild_roles: {e}")
-
-@bot.tree.command(name="cleanup", description="Clean up orphaned price roles")
-@app_commands.default_permissions(administrator=True)
-async def cleanup(interaction: discord.Interaction):
-    """Clean up orphaned price roles"""
-    await interaction.response.defer()
-    await cleanup_guild_roles(interaction.guild)
-    await interaction.followup.send("✅ Cleaned up orphaned price roles!")
-
 def save_tracked_guilds():
     """Save tracked guilds and tokens to file"""
     try:
@@ -454,7 +396,9 @@ def save_tracked_guilds():
                 "tokens": {
                     token_id: {
                         "symbol": token_config.token_symbol,
-                        "last_price": token_config.last_price
+                        "last_price": token_config.last_price,
+                        "price_24h_ago": token_config.price_24h_ago,
+                        "last_24h_update": token_config.last_24h_update
                     }
                     for token_id, token_config in config.tokens.items()
                 }
@@ -481,6 +425,8 @@ def load_tracked_guilds():
                 for token_id, token_data in guild_data["tokens"].items():
                     token_config = TokenConfig(token_id, token_data["symbol"])
                     token_config.last_price = token_data["last_price"]
+                    token_config.price_24h_ago = token_data["price_24h_ago"]
+                    token_config.last_24h_update = token_data["last_24h_update"]
                     config.tokens[token_id] = token_config
                 
                 tracked_guilds[guild_id] = config
