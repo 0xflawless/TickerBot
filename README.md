@@ -21,6 +21,7 @@ All commands use Discord's slash command system (/).
 - `/remove_token [symbol]` - Stop tracking a cryptocurrency
 - `/cleanup` - Remove unused price roles
 - `/status` - Check bot and API health
+- `/set_interval [seconds]` - Set the price update interval (minimum 60 seconds)
 
 ### User Commands (Available to Everyone)
 - `/list_tokens` - Show all tracked tokens and their prices
@@ -155,7 +156,7 @@ Railway.app provides an easy way to deploy and host the bot with automatic updat
    - Add these environment variables:
    ```env
    DISCORD_TOKEN=your_discord_bot_token
-   DEBUG=0  # Set to 1 for debug logging
+   DEBUG=0  # Optional: Set to 1 for debug logging
    ```
 
 4. **Automatic Deployment**

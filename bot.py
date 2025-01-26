@@ -8,14 +8,20 @@ from dotenv import load_dotenv
 import time
 import asyncio
 import json
-
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger('PDT_Bot')
+import sys
+from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
+DEBUG = os.getenv('DEBUG', '0').lower() in ('1', 'true', 'yes')
+
+# Setup logging with debug level based on environment variable
+logging.basicConfig(
+    level=logging.DEBUG if DEBUG else logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger('Crypto_Tracker_Bot')
 
 # Bot setup
 intents = discord.Intents.default()
@@ -38,6 +44,14 @@ SAVE_FILE = "tracked_tokens.json"
 # Add these constants near the top
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # seconds
+
+# Add constant at the top
+MAX_UPDATE_INTERVAL = 24 * 3600  # 24 hours in seconds
+
+# After loading environment variables
+if not TOKEN:
+    logger.error("No Discord token found. Make sure DISCORD_TOKEN is set in your .env file")
+    sys.exit(1)
 
 async def check_rate_limit():
     """Check and handle CoinGecko API rate limit"""
@@ -62,12 +76,15 @@ class TokenConfig:
         self.token_symbol = token_symbol
         self.price_role = None
         self.last_price = 0
+        self.price_24h_ago = 0
+        self.last_24h_update = 0  # timestamp of last 24h price update
 
 class GuildConfig:
     def __init__(self, guild_id):
         self.guild_id = guild_id
         self.is_tracking = False
         self.tokens = {}  # Dictionary of token_id: TokenConfig
+        self.update_interval = 300  # Default 5 minutes in seconds
 
 async def fetch_token_price(token_id: str, retry_count=0):
     """Fetch token price from CoinGecko API with retries"""
@@ -129,86 +146,153 @@ async def verify_token_id(token_id: str):
         logger.error(f"Error verifying token ID: {e}")
         return None, False
 
-@tasks.loop(minutes=5)
+async def fetch_token_price_with_24h(token_id: str, retry_count=0):
+    """Fetch current price and 24h change from CoinGecko"""
+    try:
+        await check_rate_limit()
+        
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            url = "https://api.coingecko.com/api/v3/simple/price"
+            params = {
+                "ids": token_id,
+                "vs_currencies": "usd",
+                "include_24hr_change": "true"
+            }
+            async with session.get(url, params=params) as response:
+                if response.status == 429:  # Rate limit exceeded
+                    if retry_count < MAX_RETRIES:
+                        logger.warning(f"Rate limit reached, retrying in {RETRY_DELAY} seconds...")
+                        await asyncio.sleep(RETRY_DELAY)
+                        return await fetch_token_price_with_24h(token_id, retry_count + 1)
+                    else:
+                        logger.error("Max retries reached for rate limit")
+                        return None, None
+                
+                if response.status == 200:
+                    data = await response.json()
+                    if token_id in data and 'usd' in data[token_id]:
+                        price = float(data[token_id]['usd'])
+                        change_24h = float(data[token_id].get('usd_24h_change', 0))
+                        return price, change_24h
+                    else:
+                        logger.error(f"Invalid response format for {token_id}")
+                        return None, None
+                else:
+                    logger.error(f"API returned status code: {response.status}")
+                    return None, None
+    except Exception as e:
+        logger.error(f"Error fetching price for {token_id}: {e}")
+        return None, None
+
+def get_trend_indicator(price: float, last_price: float, change_24h: float) -> str:
+    """Get trend indicator based on price movement"""
+    if price > last_price:
+        return "↗️"  # Up trend
+    elif price < last_price:
+        return "↘️"  # Down trend
+    return "➡️"  # Sideways
+
+@tasks.loop(seconds=60)
 async def update_price_info():
     """Update bot's nickname and role colors for all tracked tokens"""
     try:
+        current_time = int(time.time())
+        guilds_to_remove = []
+        
         for guild_id, config in tracked_guilds.items():
-            if not config.is_tracking:
-                continue
-
-            guild = bot.get_guild(guild_id)
-            if not guild:
-                logger.warning(f"Could not find guild {guild_id}")
-                continue
-
-            status_parts = []
-            tokens_to_remove = []  # Track tokens that need to be removed
-            
-            for token_id, token_config in config.tokens.items():
-                try:
-                    current_price = await fetch_token_price(token_id)
-                    if current_price is None:
-                        logger.warning(f"Failed to fetch price for {token_config.token_symbol}")
-                        continue
-
-                    status_parts.append(f"{token_config.token_symbol}: ${current_price:.4f}")
-
-                    # Handle price role
+            try:
+                if not config.is_tracking:
+                    continue
+                
+                if not hasattr(config, 'last_update_time'):
+                    config.last_update_time = 0
+                
+                if current_time - config.last_update_time < config.update_interval:
+                    continue
+                
+                guild = bot.get_guild(guild_id)
+                if not guild:
+                    logger.warning(f"Could not find guild {guild_id}, will remove from tracking")
+                    guilds_to_remove.append(guild_id)
+                    continue
+                
+                config.last_update_time = current_time
+                status_parts = []
+                
+                for token_id, token_config in config.tokens.items():
                     try:
-                        if not token_config.price_role:
-                            role_name = f"{token_config.token_symbol} Price"
-                            token_config.price_role = discord.utils.get(guild.roles, name=role_name)
-                            if not token_config.price_role:
-                                token_config.price_role = await guild.create_role(
-                                    name=role_name,
-                                    reason=f"Role for {token_config.token_symbol} price tracking"
-                                )
+                        current_price, change_24h = await fetch_token_price_with_24h(token_id)
+                        if current_price is None:
+                            continue
 
-                        # Update role color
-                        if token_config.last_price > 0:
-                            new_color = discord.Color.green() if current_price > token_config.last_price else discord.Color.red()
+                        # Get trend indicator
+                        trend = get_trend_indicator(current_price, token_config.last_price, change_24h)
+                        
+                        # Format price with trend and 24h change
+                        price_str = f"{token_config.token_symbol}: ${current_price:.4f}"
+                        if change_24h is not None:
+                            price_str += f" ({change_24h:+.1f}%) {trend}"
+                        else:
+                            price_str += f" {trend}"
+                        
+                        status_parts.append(price_str)
+
+                        # Update role color based on 24h change
+                        try:
+                            if not token_config.price_role:
+                                role_name = f"{token_config.token_symbol} Price"
+                                token_config.price_role = discord.utils.get(guild.roles, name=role_name)
+                                if not token_config.price_role:
+                                    token_config.price_role = await guild.create_role(name=role_name)
+
+                            # Use 24h change for role color if available
+                            if change_24h is not None:
+                                new_color = discord.Color.green() if change_24h > 0 else discord.Color.red()
+                            else:
+                                new_color = discord.Color.green() if current_price > token_config.last_price else discord.Color.red()
+                            
                             await token_config.price_role.edit(color=new_color)
+                        except Exception as e:
+                            logger.error(f"Error updating role: {e}")
 
                         token_config.last_price = current_price
-                    except discord.Forbidden:
-                        logger.error(f"Missing permissions for role management in guild {guild_id}")
-                    except discord.NotFound:
-                        logger.error(f"Role for {token_config.token_symbol} was deleted")
-                        token_config.price_role = None
+
                     except Exception as e:
-                        logger.error(f"Error handling role for {token_config.token_symbol}: {e}")
+                        logger.error(f"Error processing token {token_id}: {e}")
+                        continue
 
-                except Exception as e:
-                    logger.error(f"Error processing {token_config.token_symbol}: {e}")
-                    tokens_to_remove.append(token_id)
+                # Update bot nickname
+                if status_parts:
+                    try:
+                        nick = " | ".join(status_parts)
+                        if len(nick) > 32:
+                            # Intelligent truncation
+                            max_tokens = len(status_parts)
+                            while max_tokens > 0:
+                                nick = " | ".join(status_parts[:max_tokens])
+                                if len(nick) <= 29:
+                                    break
+                                max_tokens -= 1
+                            nick = nick[:29] + "..."
+                        await guild.me.edit(nick=nick)
+                    except Exception as e:
+                        logger.error(f"Error updating nickname: {e}")
 
-            # Remove failed tokens
-            for token_id in tokens_to_remove:
-                del config.tokens[token_id]
+            except Exception as e:
+                logger.error(f"Error updating guild {guild_id}: {e}")
+                continue
 
-            # Update bot nickname
-            if status_parts:
-                try:
-                    nick = " | ".join(status_parts)
-                    if len(nick) > 32:
-                        # Try to make a more intelligent truncation
-                        max_tokens = len(status_parts)
-                        while max_tokens > 0:
-                            nick = " | ".join(status_parts[:max_tokens])
-                            if len(nick) <= 29:  # Leave room for "..."
-                                break
-                            max_tokens -= 1
-                        nick = nick[:29] + "..." if len(nick) > 32 else nick
-                    
-                    await guild.me.edit(nick=nick)
-                except discord.Forbidden:
-                    logger.error(f"Cannot change nickname in guild {guild_id}")
-                except Exception as e:
-                    logger.error(f"Error updating nickname in guild {guild_id}: {e}")
+        # Clean up removed guilds
+        for guild_id in guilds_to_remove:
+            del tracked_guilds[guild_id]
+            save_tracked_guilds()
 
     except Exception as e:
-        logger.error(f"Unexpected error in update_price_info: {e}")
+        logger.error(f"Critical error in update task: {e}")
+    finally:
+        # Ensure the task keeps running even if there's an error
+        if not update_price_info.is_running():
+            update_price_info.start()
 
 @bot.event
 async def on_ready():
@@ -255,10 +339,11 @@ async def add_token(interaction: discord.Interaction, token_id: str):
     # Test price fetch
     price = await fetch_token_price(token_id)
     if price:
+        interval_str = get_human_readable_time(config.update_interval)
         await interaction.followup.send(
             f"✅ Successfully added {token_symbol} tracking!\n"
             f"Current price: ${price:.4f}\n"
-            "The bot will update prices every 5 minutes."
+            f"The bot will update prices every {interval_str}."
         )
     else:
         await interaction.followup.send(
@@ -365,6 +450,7 @@ def save_tracked_guilds():
         for guild_id, config in tracked_guilds.items():
             data[str(guild_id)] = {
                 "is_tracking": config.is_tracking,
+                "update_interval": config.update_interval,
                 "tokens": {
                     token_id: {
                         "symbol": token_config.token_symbol,
@@ -390,6 +476,7 @@ def load_tracked_guilds():
                 guild_id = int(guild_id_str)
                 config = GuildConfig(guild_id)
                 config.is_tracking = guild_data["is_tracking"]
+                config.update_interval = guild_data.get("update_interval", 300)
                 
                 for token_id, token_data in guild_data["tokens"].items():
                     token_config = TokenConfig(token_id, token_data["symbol"])
@@ -420,7 +507,27 @@ async def check_status(interaction: discord.Interaction):
         inline=False
     )
     
-    # Add guild statistics
+    # Add guild statistics and update interval
+    guild_id = interaction.guild_id
+    if guild_id in tracked_guilds:
+        config = tracked_guilds[guild_id]
+        interval_seconds = config.update_interval
+        if interval_seconds >= 3600:
+            interval_str = f"{interval_seconds / 3600:.1f} hours"
+        elif interval_seconds >= 60:
+            interval_str = f"{interval_seconds / 60:.1f} minutes"
+        else:
+            interval_str = f"{interval_seconds} seconds"
+    else:
+        interval_str = "5 minutes (default)"
+    
+    embed.add_field(
+        name="Server Settings",
+        value=f"Update Interval: {interval_str}",
+        inline=False
+    )
+    
+    # Add global statistics
     total_guilds = len(tracked_guilds)
     total_tokens = sum(len(config.tokens) for config in tracked_guilds.values())
     
@@ -431,6 +538,77 @@ async def check_status(interaction: discord.Interaction):
     )
     
     await interaction.followup.send(embed=embed)
+
+@bot.tree.command(
+    name="set_interval",
+    description="Set the price update interval (60 seconds to 24 hours)"
+)
+@app_commands.describe(
+    seconds="Update interval in seconds (60 to 86400)"
+)
+@app_commands.default_permissions(administrator=True)
+async def set_interval(interaction: discord.Interaction, seconds: int):
+    """Set the price update interval for this server"""
+    if not 60 <= seconds <= MAX_UPDATE_INTERVAL:
+        await interaction.response.send_message(
+            f"❌ Update interval must be between 60 seconds and 24 hours ({MAX_UPDATE_INTERVAL} seconds)."
+        )
+        return
+    
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        tracked_guilds[guild_id] = GuildConfig(guild_id)
+    
+    config = tracked_guilds[guild_id]
+    old_interval = config.update_interval
+    config.update_interval = seconds
+    save_tracked_guilds()
+    
+    time_str = get_human_readable_time(seconds)
+    old_time_str = get_human_readable_time(old_interval)
+    
+    await interaction.response.send_message(
+        f"✅ Update interval changed from {old_time_str} to {time_str}"
+    )
+
+def get_human_readable_time(seconds: int) -> str:
+    """Convert seconds to human readable time string"""
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f} hours"
+    elif seconds >= 60:
+        return f"{seconds / 60:.1f} minutes"
+    return f"{seconds} seconds"
+
+@bot.tree.command(
+    name="get_interval",
+    description="Show current price update interval"
+)
+async def get_interval(interaction: discord.Interaction):
+    """Show current price update interval"""
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        await interaction.response.send_message(
+            "No tokens are being tracked in this server yet."
+        )
+        return
+    
+    config = tracked_guilds[guild_id]
+    time_str = get_human_readable_time(config.update_interval)
+    
+    await interaction.response.send_message(
+        f"Current update interval: {time_str}"
+    )
+
+@bot.event
+async def on_guild_remove(guild):
+    """Cleanup when bot is removed from a guild"""
+    try:
+        if guild.id in tracked_guilds:
+            del tracked_guilds[guild.id]
+            save_tracked_guilds()
+            logger.info(f"Cleaned up tracking for removed guild {guild.id}")
+    except Exception as e:
+        logger.error(f"Error cleaning up removed guild {guild.id}: {e}")
 
 def run_bot():
     """Run the bot"""

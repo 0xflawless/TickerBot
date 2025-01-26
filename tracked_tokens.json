@@ -1,0 +1,16 @@
+{
+    "956307382919647292": {
+        "is_tracking": true,
+        "update_interval": 60,
+        "tokens": {
+            "paragonsdao": {
+                "symbol": "PDT",
+                "last_price": 0.098665
+            },
+            "echelon-prime": {
+                "symbol": "PRIME",
+                "last_price": 0
+            }
+        }
+    }
+}
