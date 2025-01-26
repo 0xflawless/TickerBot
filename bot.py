@@ -75,8 +75,7 @@ class TokenConfig:
         self.token_id = token_id
         self.token_symbol = token_symbol
         self.last_price = 0
-        self.price_24h_ago = 0
-        self.last_24h_update = 0
+        # Remove 24h fields as they're calculated on-demand
 
 class GuildConfig:
     def __init__(self, guild_id):
@@ -396,16 +395,18 @@ def save_tracked_guilds():
                 "tokens": {
                     token_id: {
                         "symbol": token_config.token_symbol,
-                        "last_price": token_config.last_price,
-                        "price_24h_ago": token_config.price_24h_ago,
-                        "last_24h_update": token_config.last_24h_update
+                        "last_price": token_config.last_price
+                        # Removed 24h fields as they're calculated dynamically
                     }
                     for token_id, token_config in config.tokens.items()
                 }
             }
         
-        with open(SAVE_FILE, 'w') as f:
+        # Save with temporary file to prevent corruption
+        temp_file = f"{SAVE_FILE}.tmp"
+        with open(temp_file, 'w') as f:
             json.dump(data, f, indent=4)
+        os.replace(temp_file, SAVE_FILE)  # Atomic operation
     except Exception as e:
         logger.error(f"Error saving tracked guilds: {e}")
 
@@ -424,14 +425,21 @@ def load_tracked_guilds():
                 
                 for token_id, token_data in guild_data["tokens"].items():
                     token_config = TokenConfig(token_id, token_data["symbol"])
-                    token_config.last_price = token_data["last_price"]
-                    token_config.price_24h_ago = token_data["price_24h_ago"]
-                    token_config.last_24h_update = token_data["last_24h_update"]
+                    # Use .get() with default values for backward compatibility
+                    token_config.last_price = token_data.get("last_price", 0)
                     config.tokens[token_id] = token_config
                 
                 tracked_guilds[guild_id] = config
     except Exception as e:
         logger.error(f"Error loading tracked guilds: {e}")
+        # If there's an error loading the file, start fresh
+        if os.path.exists(SAVE_FILE):
+            backup_name = f"{SAVE_FILE}.backup.{int(time.time())}"
+            try:
+                os.rename(SAVE_FILE, backup_name)
+                logger.info(f"Backed up corrupted save file to {backup_name}")
+            except Exception as e:
+                logger.error(f"Failed to backup corrupted save file: {e}")
 
 @bot.tree.command(name="status", description="Check bot status and API health")
 async def check_status(interaction: discord.Interaction):
