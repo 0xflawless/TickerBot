@@ -5,9 +5,13 @@
         "config_channel_id": 986393724256936027,
         "display_channel_id": 986393724256936027,
         "tokens": {
-            "paragonsdao": {
-                "symbol": "PDT",
-                "last_price": 0.098607
+            "goldilocks-dao": {
+                "symbol": "LOCKS",
+                "last_price": 0.0
+            },
+            "prg": {
+                "symbol": "PRG",
+                "last_price": 0.0
             }
         }
     },

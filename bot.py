@@ -10,11 +10,64 @@ import asyncio
 import json
 import sys
 from datetime import datetime, timedelta
+from web3 import Web3
+import requests
 
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 DEBUG = os.getenv('DEBUG', '0').lower() in ('1', 'true', 'yes')
+
+# Berachain RPC configuration
+BERACHAIN_RPC_URL = os.getenv('BERACHAIN_RPC_URL', 'https://rpc.berachain.com/')
+w3 = Web3(Web3.HTTPProvider(BERACHAIN_RPC_URL))
+
+# Smart contract addresses (from Goldilend)
+GOLDISWAP_ADDRESS = "0xb7E448E5677D212B8C8Da7D6312E8Afc49800466"
+GOLDILOCKED_ADDRESS = "0xbf2E152f460090aCE91A456e3deE5ACf703f27aD"
+TREASURY_ADDRESS = "0x895614c89beC7D11454312f740854d08CbF57A78"
+
+# ABI for smart contract interactions
+GOLDISWAP_ABI = [
+    {
+        "inputs": [],
+        "name": "fsl",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "psl", 
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalSupply",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
+
+GOLDILOCKED_ABI = [
+    {
+        "inputs": [],
+        "name": "totalSupply",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
 
 # Setup logging with debug level based on environment variable
 logging.basicConfig(
@@ -184,13 +237,81 @@ async def fetch_token_price_with_24h(token_id: str, retry_count=0):
         logger.error(f"Error fetching price for {token_id}: {e}")
         return None, None
 
+# PRG Price Calculation Functions (from Goldilend smart contracts)
+def floor_price(fsl: float, supply: float) -> float:
+    """Calculate floor price from FSL and supply"""
+    if supply == 0:
+        return 0
+    return fsl / supply
+
+def market_price(fsl: float, psl: float, supply: float) -> float:
+    """Calculate market price using bonding curve formula"""
+    if supply == 0:
+        return 0
+    floor = floor_price(fsl, supply)
+    if fsl == 0:
+        return 0
+    return floor + (psl / supply) * ((psl + fsl) / fsl) ** 6
+
+async def fetch_prg_price_from_contract():
+    """Fetch PRG price directly from Goldilend smart contracts"""
+    try:
+        # Create contract instances
+        goldiswap_contract = w3.eth.contract(
+            address=Web3.to_checksum_address(GOLDISWAP_ADDRESS),
+            abi=GOLDISWAP_ABI
+        )
+        goldilocked_contract = w3.eth.contract(
+            address=Web3.to_checksum_address(GOLDILOCKED_ADDRESS),
+            abi=GOLDILOCKED_ABI
+        )
+        
+        # Fetch contract data
+        fsl = goldiswap_contract.functions.fsl().call()
+        psl = goldiswap_contract.functions.psl().call()
+        supply = goldiswap_contract.functions.totalSupply().call()
+        prg_supply = goldilocked_contract.functions.totalSupply().call()
+        treasury_balance = goldilocked_contract.functions.balanceOf(
+            Web3.to_checksum_address(TREASURY_ADDRESS)
+        ).call()
+        
+        # Convert from wei to ether
+        fsl_float = w3.from_wei(fsl, 'ether')
+        psl_float = w3.from_wei(psl, 'ether')
+        supply_float = w3.from_wei(supply, 'ether')
+        
+        # Calculate PRG price using bonding curve
+        market = market_price(fsl_float, psl_float, supply_float)
+        floor = floor_price(fsl_float, supply_float)
+        prg_value = market - floor
+        
+        # Calculate circulating supply (total - treasury)
+        circulating_supply = w3.from_wei(prg_supply - treasury_balance, 'ether')
+        
+        logger.info(f"PRG Contract Data - FSL: {fsl_float}, PSL: {psl_float}, Supply: {supply_float}")
+        logger.info(f"PRG Price: {prg_value}, Market: {market}, Floor: {floor}")
+        
+        return {
+            'price': prg_value,
+            'market_price': market,
+            'floor_price': floor,
+            'circulating_supply': circulating_supply,
+            'fsl': fsl_float,
+            'psl': psl_float,
+            'supply': supply_float
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching PRG price from contract: {e}")
+        return None
+
 def get_trend_indicator(price: float, last_price: float, change_24h: float) -> str:
     """Get trend indicator based on price movement"""
     if price > last_price:
-        return "📈"  # Up trend (chart_with_upwards_trend)
+        return "+"  # Up trend
     elif price < last_price:
-        return "📉"  # Down trend (chart_with_downwards_trend)
-    return "➡️"  # Sideways (still keep this for no change)
+        return "-"  # Down trend
+    return "="  # Sideways
 
 async def create_or_get_role(guild: discord.Guild, name: str, reason: str) -> discord.Role:
     """Create or get a role with the given name"""
@@ -236,17 +357,34 @@ async def update_price_info():
                 status_parts = []
                 for token_id, token_config in config.tokens.items():
                     try:
-                        current_price, change_24h = await fetch_token_price_with_24h(token_id)
-                        if current_price is None:
-                            continue
-
-                        logger.debug(f"Got price for {token_config.token_symbol}: ${current_price:.4f}, 24h: {change_24h:+.1f}%")
+                        # Handle PRG token differently - fetch from smart contract
+                        if token_id == "prg" or token_config.token_symbol == "PRG":
+                            prg_data = await fetch_prg_price_from_contract()
+                            if prg_data is None:
+                                continue
+                            
+                            current_price = prg_data['price']
+                            # For PRG, we don't have 24h change from contract, so use 0
+                            change_24h = 0
+                            
+                            logger.debug(f"Got PRG price from contract: ${current_price:.6f}")
+                        else:
+                            # Regular CoinGecko tokens
+                            current_price, change_24h = await fetch_token_price_with_24h(token_id)
+                            if current_price is None:
+                                continue
+                            
+                            logger.debug(f"Got price for {token_config.token_symbol}: ${current_price:.4f}, 24h: {change_24h:+.1f}%")
                         
                         # Get trend indicator
                         trend = get_trend_indicator(current_price, token_config.last_price, change_24h)
                         
                         # Format price display (without 24h change)
-                        price_str = f"{token_config.token_symbol}: ${current_price:.4f} {trend}"
+                        if token_config.token_symbol == "PRG":
+                            # Use 4 decimal places for PRG to fit within Discord limit
+                            price_str = f"{token_config.token_symbol}: ${current_price:.4f}{trend}"
+                        else:
+                            price_str = f"{token_config.token_symbol}: ${current_price:.4f}{trend}"
                         status_parts.append(price_str)
                         
                         # Track 24h change for this guild's status
@@ -351,12 +489,39 @@ async def add_token(interaction: discord.Interaction, token_id: str):
         )
         return
 
-    # Rest of the add_token function remains the same...
+    # Handle PRG token specially
+    if token_id.lower() == "prg":
+        token_symbol = "PRG"
+        config.tokens[token_id] = TokenConfig(token_id, token_symbol)
+        config.is_tracking = True
+        save_tracked_guilds()
+        
+        # Test PRG price fetch from contract
+        prg_data = await fetch_prg_price_from_contract()
+        if prg_data:
+            price = prg_data['price']
+            interval_str = get_human_readable_time(config.update_interval)
+            await interaction.followup.send(
+                f"✅ Successfully added PRG tracking from Goldilend smart contract!\n"
+                f"Current PRG price: ${price:.6f}\n"
+                f"Market price: ${prg_data['market_price']:.6f}\n"
+                f"Floor price: ${prg_data['floor_price']:.6f}\n"
+                f"The bot will update prices every {interval_str}."
+            )
+        else:
+            await interaction.followup.send(
+                f"⚠️ PRG token added, but there was an error fetching the initial price from contract.\n"
+                "The bot will retry in the next update cycle."
+            )
+        return
+    
+    # Regular CoinGecko token verification
     token_symbol, valid = await verify_token_id(token_id)
     if not valid:
         await interaction.followup.send(
             "❌ Invalid token ID. Please check the token ID on CoinGecko.\n"
-            "Example: For Bitcoin use 'bitcoin', for Ethereum use 'ethereum'"
+            "Example: For Bitcoin use 'bitcoin', for Ethereum use 'ethereum'\n"
+            "For PRG from Goldilend contract, use 'prg'"
         )
         return
     
@@ -431,13 +596,32 @@ async def list_tokens(interaction: discord.Interaction):
     embed = discord.Embed(title="Tracked Tokens", color=discord.Color.blue())
     
     for token_id, token_config in config.tokens.items():
-        price = await fetch_token_price(token_id)
-        status = f"${price:.4f}" if price else "Unable to fetch price"
-        embed.add_field(
-            name=token_config.token_symbol,
-            value=f"Price: {status}\nToken ID: {token_id}",
-            inline=False
-        )
+        # Handle PRG token differently
+        if token_id == "prg" or token_config.token_symbol == "PRG":
+            prg_data = await fetch_prg_price_from_contract()
+            if prg_data:
+                price = prg_data['price']
+                status = f"${price:.6f} (from contract)"
+                embed.add_field(
+                    name=token_config.token_symbol,
+                    value=f"Price: {status}\nMarket: ${prg_data['market_price']:.6f}\nFloor: ${prg_data['floor_price']:.6f}\nSource: Goldilend Contract",
+                    inline=False
+                )
+            else:
+                embed.add_field(
+                    name=token_config.token_symbol,
+                    value="Price: Unable to fetch from contract\nSource: Goldilend Contract",
+                    inline=False
+                )
+        else:
+            # Regular CoinGecko tokens
+            price = await fetch_token_price(token_id)
+            status = f"${price:.4f}" if price else "Unable to fetch price"
+            embed.add_field(
+                name=token_config.token_symbol,
+                value=f"Price: {status}\nToken ID: {token_id}\nSource: CoinGecko",
+                inline=False
+            )
     
     await interaction.response.send_message(embed=embed)
 
@@ -505,17 +689,32 @@ async def check_status(interaction: discord.Interaction):
     
     embed = discord.Embed(title="Bot Status", color=discord.Color.blue())
     
-    # Check API health
+    # Check CoinGecko API health
     try:
         test_price = await fetch_token_price("bitcoin")
-        api_status = "✅ Operational" if test_price else "⚠️ Having issues"
+        coingecko_status = "✅ Operational" if test_price else "⚠️ Having issues"
     except Exception:
-        api_status = "❌ Not responding"
+        coingecko_status = "❌ Not responding"
+    
+    # Check Berachain/PRG contract health
+    try:
+        prg_data = await fetch_prg_price_from_contract()
+        contract_status = "✅ Operational" if prg_data else "⚠️ Having issues"
+        if prg_data:
+            contract_status += f"\nPRG Price: ${prg_data['price']:.6f}"
+    except Exception:
+        contract_status = "❌ Not responding"
     
     embed.add_field(
         name="CoinGecko API",
-        value=api_status,
-        inline=False
+        value=coingecko_status,
+        inline=True
+    )
+    
+    embed.add_field(
+        name="Berachain/PRG Contract",
+        value=contract_status,
+        inline=True
     )
     
     # Add guild-specific information

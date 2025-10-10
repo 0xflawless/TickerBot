@@ -71,17 +71,27 @@ To track multiple tokens:
 
 ### Available Commands
 - `/add_token [token_id]` - Add token to track
+  - For CoinGecko tokens: `bitcoin`, `ethereum`, `goldilocks-dao`
+  - For PRG from Goldilend contract: `prg`
 - `/remove_token [symbol]` - Remove tracked token
-- `/list_tokens` - Show tracked tokens
+- `/list_tokens` - Show tracked tokens with price sources
 - `/set_interval [seconds]` - Set update frequency
 - `/get_interval` - Show current update interval
-- `/status` - Check bot status
+- `/status` - Check bot status (CoinGecko + Berachain contract health)
 - `/force_update` - Force immediate update
 - `/sync` - Sync slash commands
 
 ### Display Format
-- Nickname: `BTC: $50000 📈`
-- Status: `Watching 24h: BTC +5.2%`
+- **CoinGecko tokens**: `BTC: $50000 📈`
+- **PRG from contract**: `PRG: $0.123456 📈`
+- **Status**: `Watching 24h: BTC +5.2%` (or `Watching 24h: PRG +0.0%` for contract prices)
+
+### Price Sources
+- **CoinGecko API**: For most cryptocurrencies (BTC, ETH, LOCKS, etc.)
+- **Goldilend Smart Contract**: For PRG token using bonding curve calculation
+  - Fetches FSL, PSL, and supply from Berachain contracts
+  - Calculates real-time price using: `marketPrice - floorPrice`
+  - Updates every 60 seconds with contract data
 
 ## Troubleshooting
 
