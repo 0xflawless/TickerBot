@@ -189,12 +189,16 @@ async def fetch_token_price(token_id: str, retry_count=0):
 async def verify_token_id(token_id: str):
     """Verify if token ID exists on CoinGecko"""
     try:
+        await check_rate_limit()  # Add rate limiting
         async with aiohttp.ClientSession() as session:
             url = f"https://api.coingecko.com/api/v3/coins/{token_id}"
             async with session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
                     return data['symbol'].upper(), True
+                elif response.status == 429:
+                    logger.warning("Rate limit hit during token verification")
+                    return None, False
                 return None, False
     except Exception as e:
         logger.error(f"Error verifying token ID: {e}")
@@ -346,7 +350,10 @@ async def update_price_info():
                 
                 guild = bot.get_guild(guild_id)
                 if not guild:
-                    logger.warning(f"Could not find guild {guild_id}")
+                    logger.warning(f"Could not find guild {guild_id} - removing from tracking")
+                    # Mark this guild as not tracking and save
+                    config.is_tracking = False
+                    save_tracked_guilds()
                     continue
                 
                 logger.debug(f"Processing guild: {guild.name} ({guild_id})")
@@ -442,6 +449,9 @@ async def on_ready():
     try:
         load_tracked_guilds()
         
+        # Clean up invalid guilds
+        cleanup_invalid_guilds()
+        
         # Force sync all commands
         logger.info("Syncing commands...")
         synced = await bot.tree.sync()
@@ -520,9 +530,10 @@ async def add_token(interaction: discord.Interaction, token_id: str):
     token_symbol, valid = await verify_token_id(token_id)
     if not valid:
         await interaction.followup.send(
-            "❌ Invalid token ID. Please check the token ID on CoinGecko.\n"
+            "❌ Invalid token ID or rate limit exceeded. Please check the token ID on CoinGecko.\n"
             "Example: For Bitcoin use 'bitcoin', for Ethereum use 'ethereum'\n"
-            "For PRG from Goldilend contract, use 'prg'"
+            "For PRG from Goldilend contract, use 'prg'\n"
+            "If you're getting rate limited, wait a minute and try again."
         )
         return
     
@@ -682,6 +693,27 @@ def load_tracked_guilds():
                 logger.info(f"Backed up corrupted save file to {backup_name}")
             except Exception as e:
                 logger.error(f"Failed to backup corrupted save file: {e}")
+
+def cleanup_invalid_guilds():
+    """Clean up guilds that the bot is no longer in"""
+    try:
+        invalid_guilds = []
+        for guild_id, config in tracked_guilds.items():
+            guild = bot.get_guild(guild_id)
+            if not guild:
+                logger.info(f"Removing invalid guild {guild_id} from tracking")
+                invalid_guilds.append(guild_id)
+        
+        # Remove invalid guilds
+        for guild_id in invalid_guilds:
+            del tracked_guilds[guild_id]
+        
+        if invalid_guilds:
+            save_tracked_guilds()
+            logger.info(f"Cleaned up {len(invalid_guilds)} invalid guilds")
+            
+    except Exception as e:
+        logger.error(f"Error cleaning up invalid guilds: {e}")
 
 @bot.tree.command(name="status", description="Check bot status and API health")
 async def check_status(interaction: discord.Interaction):
