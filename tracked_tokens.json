@@ -1,23 +1,8 @@
 {
-    "956307382919647292": {
-        "is_tracking": true,
-        "update_interval": 60,
-        "config_channel_id": 986393724256936027,
-        "display_channel_id": 986393724256936027,
-        "tokens": {
-            "goldilocks-dao": {
-                "symbol": "LOCKS",
-                "last_price": 0.0
-            },
-            "prg": {
-                "symbol": "PRG",
-                "last_price": 0.0
-            }
-        }
-    },
     "1215080426020798514": {
         "is_tracking": false,
-        "update_interval": 60,
+        "update_interval": 600,
+        "last_update_time": 0,
         "config_channel_id": null,
         "display_channel_id": null,
         "tokens": {}

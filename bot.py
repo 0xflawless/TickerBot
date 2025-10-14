@@ -136,7 +136,8 @@ class GuildConfig:
         self.guild_id = guild_id
         self.is_tracking = False
         self.tokens = {}  # Dictionary of token_id: TokenConfig
-        self.update_interval = 300  # Default 5 minutes in seconds
+        self.update_interval = 600  # Default 10 minutes in seconds
+        self.last_update_time = 0  # Track when we last updated this guild
         self.config_channel_id = None  # Channel for admin commands
         self.display_channel_id = None  # Channel for price display
 
@@ -332,7 +333,7 @@ async def create_or_get_role(guild: discord.Guild, name: str, reason: str) -> di
             return None
     return role
 
-@tasks.loop(seconds=60)
+@tasks.loop(seconds=600)
 async def update_price_info():
     """Update bot nicknames and status for all tracked tokens"""
     try:
@@ -356,7 +357,13 @@ async def update_price_info():
                     save_tracked_guilds()
                     continue
                 
-                logger.debug(f"Processing guild: {guild.name} ({guild_id})")
+                # Check if enough time has passed since last update
+                time_since_last_update = current_time - config.last_update_time
+                if time_since_last_update < config.update_interval:
+                    logger.debug(f"Guild {guild.name} ({guild_id}) - skipping update, {config.update_interval - time_since_last_update}s remaining")
+                    continue
+                
+                logger.debug(f"Processing guild: {guild.name} ({guild_id}) - updating after {time_since_last_update}s")
                 
                 # Reset all_24h_changes for each guild
                 all_24h_changes = []  # Move this here to reset for each guild
@@ -434,6 +441,10 @@ async def update_price_info():
                             )
                     except Exception as e:
                         logger.error(f"Error updating display in {guild.name}: {e}")
+                
+                # Update the last update time for this guild
+                config.last_update_time = current_time
+                logger.debug(f"Updated last_update_time for guild {guild.name} ({guild_id})")
 
             except Exception as e:
                 logger.error(f"Error updating guild {guild_id}: {e}")
@@ -645,6 +656,7 @@ def save_tracked_guilds():
             data[str(guild_id)] = {
                 "is_tracking": config.is_tracking,
                 "update_interval": config.update_interval,
+                "last_update_time": config.last_update_time,
                 "config_channel_id": config.config_channel_id,
                 "display_channel_id": config.display_channel_id,
                 "tokens": {
@@ -674,7 +686,8 @@ def load_tracked_guilds():
                 guild_id = int(guild_id_str)
                 config = GuildConfig(guild_id)
                 config.is_tracking = guild_data["is_tracking"]
-                config.update_interval = guild_data.get("update_interval", 300)
+                config.update_interval = guild_data.get("update_interval", 600)  # Default to 10 minutes
+                config.last_update_time = guild_data.get("last_update_time", 0)
                 config.config_channel_id = guild_data.get("config_channel_id")
                 config.display_channel_id = guild_data.get("display_channel_id")
                 
