@@ -764,6 +764,378 @@ async def setup(
             "❌ Error: Make sure the bot has permission to send messages in the configured channels."
         )
 
+# ===== ALTERNATIVE COMMANDS =====
+
+@bot.tree.command(name="track", description="Start tracking a cryptocurrency token")
+@app_commands.describe(token_id="CoinGecko token ID (e.g., 'bitcoin' or 'ethereum')")
+@app_commands.default_permissions(administrator=True)
+async def track_token(interaction: discord.Interaction, token_id: str):
+    """Alternative to add_token - Start tracking a token"""
+    await interaction.response.defer()
+    
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        tracked_guilds[guild_id] = GuildConfig(guild_id)
+    
+    config = tracked_guilds[guild_id]
+    
+    # Check if any token is already being tracked
+    if config.tokens:
+        await interaction.followup.send(
+            "⚠️ **Only one token can be tracked per bot instance!**\n\n"
+            "To track multiple tokens, you need to:\n"
+            "1. Create additional bot applications in Discord Developer Portal\n"
+            "2. Get tokens for each bot\n"
+            "3. Run separate instances of the bot with different tokens\n\n"
+            "See the README.md for instructions on setting up multiple bots."
+        )
+        return
+
+    token_symbol, valid = await verify_token_id(token_id)
+    if not valid:
+        await interaction.followup.send(
+            "❌ Invalid token ID. Please check the token ID on CoinGecko.\n"
+            "Example: For Bitcoin use 'bitcoin', for Ethereum use 'ethereum'"
+        )
+        return
+    
+    if token_id in config.tokens:
+        await interaction.followup.send(f"⚠️ {token_symbol} is already being tracked!")
+        return
+        
+    config.tokens[token_id] = TokenConfig(token_id, token_symbol)
+    config.is_tracking = True
+    save_tracked_guilds()
+    
+    # Test price fetch
+    price = await fetch_token_price(token_id)
+    if price:
+        interval_str = get_human_readable_time(config.update_interval)
+        await interaction.followup.send(
+            f"🎯 Now tracking {token_symbol}!\n"
+            f"Current price: ${price:.4f}\n"
+            f"Updates every {interval_str}."
+        )
+    else:
+        await interaction.followup.send(
+            f"⚠️ Token added to tracking, but there was an error fetching the initial price.\n"
+            "The bot will retry in the next update cycle."
+        )
+
+@bot.tree.command(name="untrack", description="Stop tracking a cryptocurrency token")
+@app_commands.describe(token_symbol="Token symbol to stop tracking (e.g., BTC, ETH)")
+@app_commands.default_permissions(administrator=True)
+async def untrack_token(interaction: discord.Interaction, token_symbol: str):
+    """Alternative to remove_token - Stop tracking a token"""
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        await interaction.response.send_message("No tokens are being tracked in this server.")
+        return
+    
+    config = tracked_guilds[guild_id]
+    token_symbol = token_symbol.upper()
+    
+    # Find token by symbol
+    token_id_to_remove = None
+    for token_id, token_config in config.tokens.items():
+        if token_config.token_symbol == token_symbol:
+            token_id_to_remove = token_id
+            # Delete the role if it exists
+            if token_config.display_role:
+                try:
+                    await token_config.display_role.delete()
+                except Exception as e:
+                    logger.error(f"Error deleting role: {e}")
+            break
+    
+    if token_id_to_remove:
+        del config.tokens[token_id_to_remove]
+        save_tracked_guilds()
+        await interaction.response.send_message(f"🛑 Stopped tracking {token_symbol}.")
+        
+        if not config.tokens:
+            config.is_tracking = False
+    else:
+        await interaction.response.send_message(f"❌ {token_symbol} is not being tracked.")
+
+@bot.tree.command(name="portfolio", description="View your tracked cryptocurrency portfolio")
+async def view_portfolio(interaction: discord.Interaction):
+    """Alternative to list_tokens - View portfolio of tracked tokens"""
+    guild_id = interaction.guild_id
+    
+    if guild_id not in tracked_guilds or not tracked_guilds[guild_id].tokens:
+        await interaction.response.send_message("📊 No tokens in your portfolio yet.")
+        return
+    
+    config = tracked_guilds[guild_id]
+    
+    embed = discord.Embed(
+        title="📊 Your Crypto Portfolio", 
+        color=discord.Color.green(),
+        description="Currently tracked tokens and their prices"
+    )
+    
+    for token_id, token_config in config.tokens.items():
+        price = await fetch_token_price(token_id)
+        status = f"${price:.4f}" if price else "Unable to fetch price"
+        embed.add_field(
+            name=f"🪙 {token_config.token_symbol}",
+            value=f"**Price:** {status}\n**ID:** `{token_id}`",
+            inline=True
+        )
+    
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="health", description="Check bot health and system status")
+async def check_health(interaction: discord.Interaction):
+    """Alternative to status - Check bot health"""
+    await interaction.response.defer()
+    
+    embed = discord.Embed(title="🏥 Bot Health Check", color=discord.Color.green())
+    
+    # Check API health
+    try:
+        test_price = await fetch_token_price("bitcoin")
+        api_status = "✅ Healthy" if test_price else "⚠️ API Issues"
+        api_color = "🟢" if test_price else "🟡"
+    except Exception:
+        api_status = "❌ API Down"
+        api_color = "🔴"
+    
+    embed.add_field(
+        name="🌐 CoinGecko API",
+        value=f"{api_color} {api_status}",
+        inline=False
+    )
+    
+    # Add guild-specific information
+    guild_id = interaction.guild_id
+    if guild_id in tracked_guilds:
+        config = tracked_guilds[guild_id]
+        interval_seconds = config.update_interval
+        if interval_seconds >= 3600:
+            interval_str = f"{interval_seconds / 3600:.1f} hours"
+        elif interval_seconds >= 60:
+            interval_str = f"{interval_seconds / 60:.1f} minutes"
+        else:
+            interval_str = f"{interval_seconds} seconds"
+        
+        tokens_in_server = len(config.tokens)
+        token_list = ", ".join(token_config.token_symbol for token_config in config.tokens.values())
+    else:
+        interval_str = "5 minutes (default)"
+        tokens_in_server = 0
+        token_list = "None"
+    
+    embed.add_field(
+        name="⚙️ Server Configuration",
+        value=f"**Update Frequency:** {interval_str}\n"
+              f"**Tracked Tokens:** {token_list}",
+        inline=False
+    )
+    
+    # Add global statistics
+    total_guilds = len(tracked_guilds)
+    unique_tokens = {
+        token_config.token_symbol 
+        for guild in tracked_guilds.values() 
+        for token_config in guild.tokens.values()
+    }
+    
+    embed.add_field(
+        name="📈 Global Stats",
+        value=f"**Active Servers:** {total_guilds}\n"
+              f"**Unique Tokens:** {len(unique_tokens)}",
+        inline=False
+    )
+    
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(
+    name="frequency",
+    description="Set how often the bot updates prices (60 seconds to 24 hours)"
+)
+@app_commands.describe(
+    seconds="Update frequency in seconds (60 to 86400)"
+)
+@app_commands.default_permissions(administrator=True)
+async def set_frequency(interaction: discord.Interaction, seconds: int):
+    """Alternative to set_interval - Set update frequency"""
+    if not 60 <= seconds <= MAX_UPDATE_INTERVAL:
+        await interaction.response.send_message(
+            f"❌ Update frequency must be between 60 seconds and 24 hours ({MAX_UPDATE_INTERVAL} seconds)."
+        )
+        return
+    
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        tracked_guilds[guild_id] = GuildConfig(guild_id)
+    
+    config = tracked_guilds[guild_id]
+    old_interval = config.update_interval
+    config.update_interval = seconds
+    save_tracked_guilds()
+    
+    time_str = get_human_readable_time(seconds)
+    old_time_str = get_human_readable_time(old_interval)
+    
+    await interaction.response.send_message(
+        f"⏰ Update frequency changed from {old_time_str} to {time_str}"
+    )
+
+@bot.tree.command(
+    name="schedule",
+    description="Show current price update schedule"
+)
+async def show_schedule(interaction: discord.Interaction):
+    """Alternative to get_interval - Show update schedule"""
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        await interaction.response.send_message(
+            "📅 No update schedule set yet. Add a token to start tracking!"
+        )
+        return
+    
+    config = tracked_guilds[guild_id]
+    time_str = get_human_readable_time(config.update_interval)
+    
+    await interaction.response.send_message(
+        f"📅 **Current Update Schedule:** {time_str}\n"
+        f"The bot will refresh prices every {time_str}."
+    )
+
+@bot.tree.command(
+    name="refresh",
+    description="Manually refresh all token prices"
+)
+@app_commands.default_permissions(administrator=True)
+async def refresh_prices(interaction: discord.Interaction):
+    """Alternative to force_update - Refresh prices"""
+    await interaction.response.defer()
+    
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        await interaction.followup.send("No tokens are being tracked in this server.")
+        return
+    
+    config = tracked_guilds[guild_id]
+    if not config.tokens:
+        await interaction.followup.send("No tokens are being tracked in this server.")
+        return
+    
+    try:
+        # Reset the last update time to force an update
+        config.last_update_time = 0
+        # Run the update
+        await update_price_info()
+        await interaction.followup.send("🔄 Price refresh completed!")
+    except Exception as e:
+        logger.error(f"Error in refresh_prices: {e}")
+        await interaction.followup.send("❌ Error refreshing prices. Check logs for details.")
+
+@bot.tree.command(
+    name="reload",
+    description="Reload and sync all bot commands (Admin only)"
+)
+@app_commands.default_permissions(administrator=True)
+async def reload_commands(interaction: discord.Interaction):
+    """Alternative to sync - Reload commands"""
+    await interaction.response.defer()
+    
+    try:
+        synced = await bot.tree.sync()
+        await interaction.followup.send(
+            f"🔄 Successfully reloaded {len(synced)} commands!\n"
+            "All commands should now be available."
+        )
+        logger.info(f"Manually reloaded {len(synced)} commands")
+    except Exception as e:
+        logger.error(f"Error reloading commands: {e}")
+        await interaction.followup.send("❌ Failed to reload commands!")
+
+@bot.tree.command(
+    name="configure",
+    description="Configure bot settings and channels"
+)
+@app_commands.describe(
+    config_channel="Channel for bot configuration commands",
+    display_channel="Channel where price updates will be shown"
+)
+@app_commands.default_permissions(administrator=True)
+async def configure_bot(
+    interaction: discord.Interaction,
+    config_channel: discord.TextChannel,
+    display_channel: discord.TextChannel
+):
+    """Alternative to setup - Configure bot"""
+    await interaction.response.defer()
+    
+    guild_id = interaction.guild_id
+    if guild_id not in tracked_guilds:
+        tracked_guilds[guild_id] = GuildConfig(guild_id)
+    
+    config = tracked_guilds[guild_id]
+    
+    # Save channel IDs
+    config.config_channel_id = config_channel.id
+    config.display_channel_id = display_channel.id
+    save_tracked_guilds()
+    
+    # Create configuration message
+    embed = discord.Embed(
+        title="⚙️ Bot Configuration",
+        description="Your bot is now configured! Use these commands to manage it:",
+        color=discord.Color.purple()
+    )
+    
+    embed.add_field(
+        name="🎯 Track Tokens",
+        value="`/track [token_id]` - Start tracking a token\n"
+              "Example: `/track bitcoin`",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="⏰ Set Update Frequency",
+        value="`/frequency [seconds]` - Set how often prices update\n"
+              "Example: `/frequency 300` for 5 minutes",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📊 Display Channel",
+        value=f"Price updates will be shown in {display_channel.mention}",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="⚙️ Config Channel",
+        value=f"Use commands in {config_channel.mention}",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📋 Available Commands",
+        value="`/portfolio` - View tracked tokens\n"
+              "`/untrack [symbol]` - Stop tracking a token\n"
+              "`/health` - Check bot status\n"
+              "`/refresh` - Force price update\n"
+              "`/schedule` - Show update schedule",
+        inline=False
+    )
+    
+    # Send configuration guide to config channel
+    try:
+        await config_channel.send(embed=embed)
+        await interaction.followup.send(
+            f"✅ Configuration complete! Check {config_channel.mention} for management instructions."
+        )
+    except Exception as e:
+        logger.error(f"Error sending configuration message: {e}")
+        await interaction.followup.send(
+            "❌ Error: Make sure the bot has permission to send messages in the configured channels."
+        )
+
 def run_bot():
     """Run the bot"""
     bot.run(TOKEN)
