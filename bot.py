@@ -190,7 +190,19 @@ async def fetch_token_price(token_id: str, retry_count=0):
 async def verify_token_id(token_id: str):
     """Verify if token ID exists on CoinGecko"""
     try:
-        await check_rate_limit()  # Add rate limiting
+        # Known valid tokens - skip API call for these
+        known_tokens = {
+            "bitcoin": "BTC",
+            "ethereum": "ETH", 
+            "goldilocks-dao": "LOCKS",
+            "prg": "PRG"
+        }
+        
+        if token_id.lower() in known_tokens:
+            return known_tokens[token_id.lower()], True
+        
+        # Use a more lenient rate limit for verification
+        await check_rate_limit_verification()
         async with aiohttp.ClientSession() as session:
             url = f"https://api.coingecko.com/api/v3/coins/{token_id}"
             async with session.get(url) as response:
@@ -198,11 +210,62 @@ async def verify_token_id(token_id: str):
                     data = await response.json()
                     return data['symbol'].upper(), True
                 elif response.status == 429:
-                    logger.warning("Rate limit hit during token verification")
-                    return None, False
+                    logger.warning("Rate limit hit during token verification - trying fallback")
+                    # Try fallback verification using the price endpoint
+                    return await verify_token_id_fallback(token_id)
                 return None, False
     except Exception as e:
         logger.error(f"Error verifying token ID: {e}")
+        return None, False
+
+async def check_rate_limit_verification():
+    """More lenient rate limiting for token verification"""
+    global rate_limit_counter, last_reset_time
+    current_time = time.time()
+    
+    # Reset counter every minute
+    if current_time - last_reset_time >= 60:
+        rate_limit_counter = 0
+        last_reset_time = current_time
+    
+    # More lenient limit for verification (100 requests per minute)
+    if rate_limit_counter >= 100:
+        sleep_time = 60 - (current_time - last_reset_time)
+        if sleep_time > 0:
+            logger.info(f"Rate limit reached for verification, sleeping for {sleep_time:.1f}s")
+            await asyncio.sleep(sleep_time)
+            rate_limit_counter = 0
+            last_reset_time = time.time()
+    
+    rate_limit_counter += 1
+
+async def verify_token_id_fallback(token_id: str):
+    """Fallback verification using the price endpoint"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = "https://api.coingecko.com/api/v3/simple/price"
+            params = {
+                "ids": token_id,
+                "vs_currencies": "usd"
+            }
+            async with session.get(url, params=params) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    if token_id in data:
+                        # Get the symbol from the detailed endpoint if possible
+                        try:
+                            detail_url = f"https://api.coingecko.com/api/v3/coins/{token_id}"
+                            async with session.get(detail_url) as detail_response:
+                                if detail_response.status == 200:
+                                    detail_data = await detail_response.json()
+                                    return detail_data['symbol'].upper(), True
+                        except:
+                            pass
+                        # Fallback to using token_id as symbol
+                        return token_id.upper(), True
+                return None, False
+    except Exception as e:
+        logger.error(f"Error in fallback verification: {e}")
         return None, False
 
 async def fetch_token_price_with_24h(token_id: str, retry_count=0):
@@ -541,10 +604,10 @@ async def add_token(interaction: discord.Interaction, token_id: str):
     token_symbol, valid = await verify_token_id(token_id)
     if not valid:
         await interaction.followup.send(
-            "❌ Invalid token ID or rate limit exceeded. Please check the token ID on CoinGecko.\n"
+            "❌ Invalid token ID or temporary API issue. Please check the token ID on CoinGecko.\n"
             "Example: For Bitcoin use 'bitcoin', for Ethereum use 'ethereum'\n"
-            "For PRG from Goldilend contract, use 'prg'\n"
-            "If you're getting rate limited, wait a minute and try again."
+            "For Goldilocks DAO use 'goldilocks-dao', for PRG use 'prg'\n"
+            "If the token exists, wait a moment and try again."
         )
         return
     
