@@ -3,7 +3,6 @@ import os
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import aiohttp
 import logging
 from dotenv import load_dotenv
 import time
@@ -12,7 +11,6 @@ import json
 import sys
 from datetime import datetime, timedelta
 from web3 import Web3
-import requests
 
 # Load environment variables
 load_dotenv()
@@ -87,11 +85,6 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 tracked_guilds = {}  # Store guild configurations
 last_price = 0
 
-# Add rate limiting for CoinGecko API
-COINGECKO_RATE_LIMIT = 50  # requests per minute
-rate_limit_counter = 0
-last_reset_time = 0
-
 # Add after other global variables
 SAVE_FILE = "tracked_tokens.json"
 
@@ -107,136 +100,16 @@ if not TOKEN:
     logger.error("No Discord token found. Make sure DISCORD_TOKEN is set in your .env file")
     sys.exit(1)
 
-async def check_rate_limit():
-    """Check and handle CoinGecko API rate limit"""
-    global rate_limit_counter, last_reset_time
-    current_time = int(time.time())
-    
-    # Reset counter every minute
-    if current_time - last_reset_time >= 60:
-        rate_limit_counter = 0
-        last_reset_time = current_time
-    
-    if rate_limit_counter >= COINGECKO_RATE_LIMIT:
-        await asyncio.sleep(60 - (current_time - last_reset_time))
-        rate_limit_counter = 0
-        last_reset_time = int(time.time())
-    
-    rate_limit_counter += 1
-
-class TokenConfig:
-    def __init__(self, token_id: str, token_symbol: str):
-        self.token_id = token_id
-        self.token_symbol = token_symbol
-        self.display_role = None  # Add this for the display role
-        self.last_price = 0
 
 class GuildConfig:
     def __init__(self, guild_id):
         self.guild_id = guild_id
         self.is_tracking = False
-        self.tokens = {}  # Dictionary of token_id: TokenConfig
         self.update_interval = 300  # Default 5 minutes in seconds
         self.config_channel_id = None  # Channel for admin commands
         self.display_channel_id = None  # Channel for price display
+        self.last_price = 0
 
-async def fetch_token_price(token_id: str, retry_count=0):
-    """Fetch token price from CoinGecko API with retries"""
-    try:
-        await check_rate_limit()
-        
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            url = "https://api.coingecko.com/api/v3/simple/price"
-            params = {
-                "ids": token_id,
-                "vs_currencies": "usd"
-            }
-            async with session.get(url, params=params) as response:
-                if response.status == 429:  # Rate limit exceeded
-                    if retry_count < MAX_RETRIES:
-                        logger.warning(f"Rate limit reached, retrying in {RETRY_DELAY} seconds...")
-                        await asyncio.sleep(RETRY_DELAY)
-                        return await fetch_token_price(token_id, retry_count + 1)
-                    else:
-                        logger.error("Max retries reached for rate limit")
-                        return None
-                
-                if response.status == 200:
-                    data = await response.json()
-                    if token_id in data and 'usd' in data[token_id]:
-                        return float(data[token_id]['usd'])
-                    else:
-                        logger.error(f"Invalid response format for {token_id}")
-                        return None
-                elif response.status >= 500 and retry_count < MAX_RETRIES:
-                    logger.warning(f"Server error {response.status}, retrying...")
-                    await asyncio.sleep(RETRY_DELAY)
-                    return await fetch_token_price(token_id, retry_count + 1)
-                else:
-                    logger.error(f"API returned status code: {response.status}")
-                    return None
-    except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-        if retry_count < MAX_RETRIES:
-            logger.warning(f"Network error, retrying... Error: {e}")
-            await asyncio.sleep(RETRY_DELAY)
-            return await fetch_token_price(token_id, retry_count + 1)
-        logger.error(f"Max retries reached for network error: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Error fetching price for {token_id}: {e}")
-        return None
-
-async def verify_token_id(token_id: str):
-    """Verify if token ID exists on CoinGecko"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.coingecko.com/api/v3/coins/{token_id}"
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data['symbol'].upper(), True
-                return None, False
-    except Exception as e:
-        logger.error(f"Error verifying token ID: {e}")
-        return None, False
-
-async def fetch_token_price_with_24h(token_id: str, retry_count=0):
-    """Fetch current price and 24h change from CoinGecko"""
-    try:
-        await check_rate_limit()
-        
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            url = "https://api.coingecko.com/api/v3/simple/price"
-            params = {
-                "ids": token_id,
-                "vs_currencies": "usd",
-                "include_24hr_change": "true"
-            }
-            async with session.get(url, params=params) as response:
-                if response.status == 429:  # Rate limit exceeded
-                    if retry_count < MAX_RETRIES:
-                        logger.warning(f"Rate limit reached, retrying in {RETRY_DELAY} seconds...")
-                        await asyncio.sleep(RETRY_DELAY)
-                        return await fetch_token_price_with_24h(token_id, retry_count + 1)
-                    else:
-                        logger.error("Max retries reached for rate limit")
-                        return None, None
-                
-                if response.status == 200:
-                    data = await response.json()
-                    if token_id in data and 'usd' in data[token_id]:
-                        price = float(data[token_id]['usd'])
-                        change_24h = float(data[token_id].get('usd_24h_change', 0))
-                        return price, change_24h
-                    else:
-                        logger.error(f"Invalid response format for {token_id}")
-                        return None, None
-                else:
-                    logger.error(f"API returned status code: {response.status}")
-                    return None, None
-    except Exception as e:
-        logger.error(f"Error fetching price for {token_id}: {e}")
-        return None, None
 
 # PRG Price Calculation Functions (from Goldilend smart contracts)
 def floor_price(fsl: float, supply: float) -> float:
@@ -330,13 +203,10 @@ async def create_or_get_role(guild: discord.Guild, name: str, reason: str) -> di
 
 @tasks.loop(seconds=60)
 async def update_price_info():
-    """Update bot nicknames and status for all tracked tokens"""
+    """Update bot nicknames and status for PRG price tracking"""
     try:
         current_time = int(time.time())
-        logger.info("Running price update check...")
-        
-        # Track all 24h changes for global status
-        all_24h_changes = []
+        logger.info("Running PRG price update check...")
         
         for guild_id, config in tracked_guilds.items():
             try:
@@ -351,82 +221,39 @@ async def update_price_info():
                 
                 logger.debug(f"Processing guild: {guild.name} ({guild_id})")
                 
-                # Reset all_24h_changes for each guild
-                all_24h_changes = []  # Move this here to reset for each guild
+                # Fetch PRG price from smart contract
+                prg_data = await fetch_prg_price_from_contract()
+                if prg_data is None:
+                    logger.warning(f"Failed to fetch PRG price for guild {guild_id}")
+                    continue
                 
-                # Collect all price information first
-                status_parts = []
-                for token_id, token_config in config.tokens.items():
-                    try:
-                        # Handle PRG token differently - fetch from smart contract
-                        if token_id == "prg" or token_config.token_symbol == "PRG":
-                            prg_data = await fetch_prg_price_from_contract()
-                            if prg_data is None:
-                                continue
-                            
-                            current_price = prg_data['price']
-                            # For PRG, we don't have 24h change from contract, so use 0
-                            change_24h = 0
-                            
-                            logger.debug(f"Got PRG price from contract: ${current_price:.6f}")
-                        else:
-                            # Regular CoinGecko tokens
-                            current_price, change_24h = await fetch_token_price_with_24h(token_id)
-                            if current_price is None:
-                                continue
-                            
-                            logger.debug(f"Got price for {token_config.token_symbol}: ${current_price:.4f}, 24h: {change_24h:+.1f}%")
-                        
-                        # Get trend indicator
-                        trend = get_trend_indicator(current_price, token_config.last_price, change_24h)
-                        
-                        # Format price display (without 24h change)
-                        if token_config.token_symbol == "PRG":
-                            # Use 4 decimal places for PRG to fit within Discord limit
-                            price_str = f"{token_config.token_symbol}: ${current_price:.4f}{trend}"
-                        else:
-                            price_str = f"{token_config.token_symbol}: ${current_price:.4f}{trend}"
-                        status_parts.append(price_str)
-                        
-                        # Track 24h change for this guild's status
-                        if change_24h is not None:
-                            all_24h_changes.append((token_config.token_symbol, change_24h))
-                        
-                        token_config.last_price = current_price
-
-                    except Exception as e:
-                        logger.error(f"Error processing token {token_id}: {e}")
-                        continue
-
-                # Update bot nickname with prices
-                if status_parts:
-                    try:
-                        nick = " | ".join(status_parts)
-                        if len(nick) > 32:
-                            max_tokens = len(status_parts)
-                            while max_tokens > 0:
-                                nick = " | ".join(status_parts[:max_tokens])
-                                if len(nick) <= 29:
-                                    break
-                                max_tokens -= 1
-                            nick = nick[:29] + "..." if len(nick) > 32 else nick
-                        
-                        logger.debug(f"Setting nickname in {guild.name} to: {nick}")
-                        await guild.me.edit(nick=nick)
-                        
-                        # Update status for this guild's token only
-                        if all_24h_changes:
-                            symbol, change = all_24h_changes[0]  # Get first (and only) token
-                            status = f"24h: {symbol} {change:+.1f}%"
-                            logger.debug(f"Setting status in {guild.name} to: {status}")
-                            await bot.change_presence(
-                                activity=discord.Activity(
-                                    type=discord.ActivityType.watching,
-                                    name=status
-                                )
-                            )
-                    except Exception as e:
-                        logger.error(f"Error updating display in {guild.name}: {e}")
+                current_price = prg_data['price']
+                
+                # Get trend indicator
+                trend = get_trend_indicator(current_price, config.last_price, 0)
+                
+                # Format price display for PRG
+                price_str = f"PRG: ${current_price:.4f}{trend}"
+                
+                # Update bot nickname with PRG price
+                try:
+                    logger.debug(f"Setting nickname in {guild.name} to: {price_str}")
+                    await guild.me.edit(nick=price_str)
+                    
+                    # Update status (PRG doesn't have 24h change from contract)
+                    status = "PRG from Goldilend"
+                    logger.debug(f"Setting status in {guild.name} to: {status}")
+                    await bot.change_presence(
+                        activity=discord.Activity(
+                            type=discord.ActivityType.watching,
+                            name=status
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Error updating display in {guild.name}: {e}")
+                
+                # Update last price
+                config.last_price = current_price
 
             except Exception as e:
                 logger.error(f"Error updating guild {guild_id}: {e}")
@@ -455,21 +282,18 @@ async def on_ready():
         update_price_info.start()
         logger.info("Price update task started")
         
-        # Log currently tracked guilds and tokens
+        # Log currently tracked guilds
         for guild_id, config in tracked_guilds.items():
             guild = bot.get_guild(guild_id)
             guild_name = guild.name if guild else "Unknown Guild"
-            logger.info(f"Tracking in {guild_name} ({guild_id}):")
-            for token_id, token_config in config.tokens.items():
-                logger.info(f"- {token_config.token_symbol} ({token_id})")
+            logger.info(f"Tracking PRG in {guild_name} ({guild_id})")
     except Exception as e:
         logger.error(f"Error in on_ready: {e}")
 
-@bot.tree.command(name="add_token", description="Add a token to track in this server")
-@app_commands.describe(token_id="CoinGecko token ID (e.g., 'bitcoin' or 'ethereum')")
+@bot.tree.command(name="start_prg", description="Start tracking PRG price from Goldilend smart contracts")
 @app_commands.default_permissions(administrator=True)
-async def add_token(interaction: discord.Interaction, token_id: str):
-    """Add a token to track"""
+async def start_prg(interaction: discord.Interaction):
+    """Start tracking PRG price"""
     await interaction.response.defer()
     
     guild_id = interaction.guild_id
@@ -478,156 +302,115 @@ async def add_token(interaction: discord.Interaction, token_id: str):
     
     config = tracked_guilds[guild_id]
     
-    # Check if any token is already being tracked
-    if config.tokens:
+    # Check if PRG is already being tracked
+    if config.is_tracking:
         await interaction.followup.send(
-            "⚠️ **Only one token can be tracked per bot instance!**\n\n"
-            "To track multiple tokens, you need to:\n"
-            "1. Create additional bot applications in Discord Developer Portal\n"
-            "2. Get tokens for each bot\n"
-            "3. Run separate instances of the bot with different tokens\n\n"
-            "See the README.md for instructions on setting up multiple bots."
+            "⚠️ **PRG is already being tracked in this server!**\n\n"
+            "This bot only tracks PRG price from Goldilend smart contracts."
         )
         return
 
-    # Handle PRG token specially
-    if token_id.lower() == "prg":
-        token_symbol = "PRG"
-        config.tokens[token_id] = TokenConfig(token_id, token_symbol)
-        config.is_tracking = True
-        save_tracked_guilds()
-        
-        # Test PRG price fetch from contract
-        prg_data = await fetch_prg_price_from_contract()
-        if prg_data:
-            price = prg_data['price']
-            interval_str = get_human_readable_time(config.update_interval)
-            await interaction.followup.send(
-                f"✅ Successfully added PRG tracking from Goldilend smart contract!\n"
-                f"Current PRG price: ${price:.6f}\n"
-                f"Market price: ${prg_data['market_price']:.6f}\n"
-                f"Floor price: ${prg_data['floor_price']:.6f}\n"
-                f"The bot will update prices every {interval_str}."
-            )
-        else:
-            await interaction.followup.send(
-                f"⚠️ PRG token added, but there was an error fetching the initial price from contract.\n"
-                "The bot will retry in the next update cycle."
-            )
-        return
-    
-    # Regular CoinGecko token verification
-    token_symbol, valid = await verify_token_id(token_id)
-    if not valid:
-        await interaction.followup.send(
-            "❌ Invalid token ID. Please check the token ID on CoinGecko.\n"
-            "Example: For Bitcoin use 'bitcoin', for Ethereum use 'ethereum'\n"
-            "For PRG from Goldilend contract, use 'prg'"
-        )
-        return
-    
-    if token_id in config.tokens:
-        await interaction.followup.send(f"⚠️ {token_symbol} is already being tracked!")
-        return
-        
-    config.tokens[token_id] = TokenConfig(token_id, token_symbol)
+    # Start PRG tracking
     config.is_tracking = True
     save_tracked_guilds()
     
-    # Test price fetch
-    price = await fetch_token_price(token_id)
-    if price:
+    # Test PRG price fetch from contract
+    prg_data = await fetch_prg_price_from_contract()
+    if prg_data:
+        price = prg_data['price']
         interval_str = get_human_readable_time(config.update_interval)
         await interaction.followup.send(
-            f"✅ Successfully added {token_symbol} tracking!\n"
-            f"Current price: ${price:.4f}\n"
+            f"✅ Successfully started PRG tracking from Goldilend smart contract!\n"
+            f"Current PRG price: ${price:.6f}\n"
+            f"Market price: ${prg_data['market_price']:.6f}\n"
+            f"Floor price: ${prg_data['floor_price']:.6f}\n"
             f"The bot will update prices every {interval_str}."
         )
     else:
         await interaction.followup.send(
-            f"⚠️ Token added, but there was an error fetching the initial price.\n"
+            f"⚠️ PRG tracking started, but there was an error fetching the initial price from contract.\n"
             "The bot will retry in the next update cycle."
         )
 
-@bot.tree.command(name="remove_token")
-async def remove_token(interaction: discord.Interaction, token_symbol: str):
-    """Remove a token from tracking"""
+@bot.tree.command(name="stop_prg", description="Stop tracking PRG price")
+@app_commands.default_permissions(administrator=True)
+async def stop_prg(interaction: discord.Interaction):
+    """Stop tracking PRG price"""
     guild_id = interaction.guild_id
     if guild_id not in tracked_guilds:
-        await interaction.response.send_message("No tokens are being tracked in this server.")
+        await interaction.response.send_message("PRG is not being tracked in this server.")
         return
     
     config = tracked_guilds[guild_id]
-    token_symbol = token_symbol.upper()
     
-    # Find token by symbol
-    token_id_to_remove = None
-    for token_id, token_config in config.tokens.items():
-        if token_config.token_symbol == token_symbol:
-            token_id_to_remove = token_id
-            # Delete the role if it exists
-            if token_config.display_role:
-                try:
-                    await token_config.display_role.delete()
-                except Exception as e:
-                    logger.error(f"Error deleting role: {e}")
-            break
+    if not config.is_tracking:
+        await interaction.response.send_message("❌ PRG is not being tracked in this server.")
+        return
     
-    if token_id_to_remove:
-        del config.tokens[token_id_to_remove]
-        save_tracked_guilds()
-        await interaction.response.send_message(f"✅ Removed {token_symbol} from tracking.")
-        
-        if not config.tokens:
-            config.is_tracking = False
-    else:
-        await interaction.response.send_message(f"❌ {token_symbol} is not being tracked.")
+    config.is_tracking = False
+    save_tracked_guilds()
+    await interaction.response.send_message("✅ Stopped PRG price tracking.")
 
-@bot.tree.command(name="list_tokens", description="List all tracked tokens")
-async def list_tokens(interaction: discord.Interaction):
-    """List all tracked tokens and their prices"""
+@bot.tree.command(name="prg_status", description="Show PRG price and tracking status")
+async def prg_status(interaction: discord.Interaction):
+    """Show PRG price and tracking status"""
     guild_id = interaction.guild_id
     
-    if guild_id not in tracked_guilds or not tracked_guilds[guild_id].tokens:
-        await interaction.response.send_message("No tokens are being tracked in this server.")
+    if guild_id not in tracked_guilds:
+        await interaction.response.send_message("PRG is not being tracked in this server. Use `/start_prg` to begin tracking.")
         return
     
     config = tracked_guilds[guild_id]
     
-    embed = discord.Embed(title="Tracked Tokens", color=discord.Color.blue())
+    if not config.is_tracking:
+        await interaction.response.send_message("PRG is not being tracked in this server. Use `/start_prg` to begin tracking.")
+        return
     
-    for token_id, token_config in config.tokens.items():
-        # Handle PRG token differently
-        if token_id == "prg" or token_config.token_symbol == "PRG":
-            prg_data = await fetch_prg_price_from_contract()
-            if prg_data:
-                price = prg_data['price']
-                status = f"${price:.6f} (from contract)"
-                embed.add_field(
-                    name=token_config.token_symbol,
-                    value=f"Price: {status}\nMarket: ${prg_data['market_price']:.6f}\nFloor: ${prg_data['floor_price']:.6f}\nSource: Goldilend Contract",
-                    inline=False
-                )
-            else:
-                embed.add_field(
-                    name=token_config.token_symbol,
-                    value="Price: Unable to fetch from contract\nSource: Goldilend Contract",
-                    inline=False
-                )
-        else:
-            # Regular CoinGecko tokens
-            price = await fetch_token_price(token_id)
-            status = f"${price:.4f}" if price else "Unable to fetch price"
-            embed.add_field(
-                name=token_config.token_symbol,
-                value=f"Price: {status}\nToken ID: {token_id}\nSource: CoinGecko",
-                inline=False
-            )
+    embed = discord.Embed(title="PRG Price Status", color=discord.Color.blue())
+    
+    # Fetch current PRG data
+    prg_data = await fetch_prg_price_from_contract()
+    if prg_data:
+        price = prg_data['price']
+        embed.add_field(
+            name="PRG Price",
+            value=f"**Current Price:** ${price:.6f}\n"
+                  f"**Market Price:** ${prg_data['market_price']:.6f}\n"
+                  f"**Floor Price:** ${prg_data['floor_price']:.6f}\n"
+                  f"**Circulating Supply:** {prg_data['circulating_supply']:.2f}\n"
+                  f"**Source:** Goldilend Smart Contract",
+            inline=False
+        )
+        
+        # Add contract data
+        embed.add_field(
+            name="Contract Data",
+            value=f"**FSL:** {prg_data['fsl']:.6f}\n"
+                  f"**PSL:** {prg_data['psl']:.6f}\n"
+                  f"**Supply:** {prg_data['supply']:.6f}",
+            inline=True
+        )
+        
+        # Add tracking info
+        interval_str = get_human_readable_time(config.update_interval)
+        embed.add_field(
+            name="Tracking Info",
+            value=f"**Status:** ✅ Active\n"
+                  f"**Update Interval:** {interval_str}\n"
+                  f"**Last Price:** ${config.last_price:.6f}",
+            inline=True
+        )
+    else:
+        embed.add_field(
+            name="PRG Price",
+            value="❌ Unable to fetch price from contract\n**Source:** Goldilend Smart Contract",
+            inline=False
+        )
     
     await interaction.response.send_message(embed=embed)
 
 def save_tracked_guilds():
-    """Save tracked guilds and tokens to file"""
+    """Save tracked guilds to file"""
     try:
         data = {}
         for guild_id, config in tracked_guilds.items():
@@ -636,13 +419,7 @@ def save_tracked_guilds():
                 "update_interval": config.update_interval,
                 "config_channel_id": config.config_channel_id,
                 "display_channel_id": config.display_channel_id,
-                "tokens": {
-                    token_id: {
-                        "symbol": token_config.token_symbol,
-                        "last_price": token_config.last_price
-                    }
-                    for token_id, token_config in config.tokens.items()
-                }
+                "last_price": config.last_price
             }
         
         temp_file = f"{SAVE_FILE}.tmp"
@@ -653,7 +430,7 @@ def save_tracked_guilds():
         logger.error(f"Error saving tracked guilds: {e}")
 
 def load_tracked_guilds():
-    """Load tracked guilds and tokens from file"""
+    """Load tracked guilds from file"""
     try:
         if os.path.exists(SAVE_FILE):
             with open(SAVE_FILE, 'r') as f:
@@ -662,15 +439,11 @@ def load_tracked_guilds():
             for guild_id_str, guild_data in data.items():
                 guild_id = int(guild_id_str)
                 config = GuildConfig(guild_id)
-                config.is_tracking = guild_data["is_tracking"]
+                config.is_tracking = guild_data.get("is_tracking", False)
                 config.update_interval = guild_data.get("update_interval", 300)
                 config.config_channel_id = guild_data.get("config_channel_id")
                 config.display_channel_id = guild_data.get("display_channel_id")
-                
-                for token_id, token_data in guild_data["tokens"].items():
-                    token_config = TokenConfig(token_id, token_data["symbol"])
-                    token_config.last_price = token_data.get("last_price", 0)
-                    config.tokens[token_id] = token_config
+                config.last_price = guild_data.get("last_price", 0)
                 
                 tracked_guilds[guild_id] = config
     except Exception as e:
@@ -683,19 +456,12 @@ def load_tracked_guilds():
             except Exception as e:
                 logger.error(f"Failed to backup corrupted save file: {e}")
 
-@bot.tree.command(name="status", description="Check bot status and API health")
+@bot.tree.command(name="status", description="Check bot status and PRG contract health")
 async def check_status(interaction: discord.Interaction):
-    """Check bot status and API health"""
+    """Check bot status and PRG contract health"""
     await interaction.response.defer()
     
-    embed = discord.Embed(title="Bot Status", color=discord.Color.blue())
-    
-    # Check CoinGecko API health
-    try:
-        test_price = await fetch_token_price("bitcoin")
-        coingecko_status = "✅ Operational" if test_price else "⚠️ Having issues"
-    except Exception:
-        coingecko_status = "❌ Not responding"
+    embed = discord.Embed(title="PRG Bot Status", color=discord.Color.blue())
     
     # Check Berachain/PRG contract health
     try:
@@ -705,12 +471,6 @@ async def check_status(interaction: discord.Interaction):
             contract_status += f"\nPRG Price: ${prg_data['price']:.6f}"
     except Exception:
         contract_status = "❌ Not responding"
-    
-    embed.add_field(
-        name="CoinGecko API",
-        value=coingecko_status,
-        inline=True
-    )
     
     embed.add_field(
         name="Berachain/PRG Contract",
@@ -730,33 +490,27 @@ async def check_status(interaction: discord.Interaction):
         else:
             interval_str = f"{interval_seconds} seconds"
         
-        # Show tokens tracked in this server
-        tokens_in_server = len(config.tokens)
-        token_list = ", ".join(token_config.token_symbol for token_config in config.tokens.values())
+        # Show PRG tracking status
+        prg_status = "✅ Active" if config.is_tracking else "❌ Inactive"
     else:
         interval_str = "5 minutes (default)"
-        tokens_in_server = 0
-        token_list = "None"
+        prg_status = "❌ Not configured"
     
     embed.add_field(
         name="Server Settings",
         value=f"Update Interval: {interval_str}\n"
-              f"Tokens in this server: {token_list}",
+              f"PRG Tracking: {prg_status}",
         inline=False
     )
     
-    # Add global statistics (count unique tokens)
+    # Add global statistics
     total_guilds = len(tracked_guilds)
-    unique_tokens = {
-        token_config.token_symbol 
-        for guild in tracked_guilds.values() 
-        for token_config in guild.tokens.values()
-    }
+    active_guilds = sum(1 for config in tracked_guilds.values() if config.is_tracking)
     
     embed.add_field(
         name="Global Statistics",
         value=f"Total Servers: {total_guilds}\n"
-              f"Unique Tokens Tracked: {len(unique_tokens)}",
+              f"Active PRG Tracking: {active_guilds}",
         inline=False
     )
     
@@ -844,12 +598,12 @@ async def force_update(interaction: discord.Interaction):
     
     guild_id = interaction.guild_id
     if guild_id not in tracked_guilds:
-        await interaction.followup.send("No tokens are being tracked in this server.")
+        await interaction.followup.send("PRG is not being tracked in this server.")
         return
     
     config = tracked_guilds[guild_id]
-    if not config.tokens:
-        await interaction.followup.send("No tokens are being tracked in this server.")
+    if not config.is_tracking:
+        await interaction.followup.send("PRG is not being tracked in this server.")
         return
     
     try:
@@ -918,9 +672,8 @@ async def setup(
     )
     
     embed.add_field(
-        name="1️⃣ Add Tokens",
-        value="`/add_token [token_id]` - Add tokens to track\n"
-              "Example: `/add_token bitcoin`",
+        name="1️⃣ Start PRG Tracking",
+        value="`/start_prg` - Start tracking PRG price from Goldilend smart contracts",
         inline=False
     )
     
@@ -945,8 +698,8 @@ async def setup(
     
     embed.add_field(
         name="Other Commands",
-        value="`/list_tokens` - Show tracked tokens\n"
-              "`/remove_token [symbol]` - Stop tracking a token\n"
+        value="`/prg_status` - Show PRG price and tracking status\n"
+              "`/stop_prg` - Stop tracking PRG price\n"
               "`/status` - Check bot status\n"
               "`/force_update` - Force immediate update",
         inline=False

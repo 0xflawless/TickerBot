@@ -5,7 +5,7 @@ import asyncio
 from dotenv import load_dotenv
 
 async def check_bot_health():
-    """Basic health check for the bot"""
+    """Basic health check for the PRG bot"""
     try:
         # Check if token exists
         load_dotenv()
@@ -13,14 +13,18 @@ async def check_bot_health():
             print("Discord token not found")
             return False
         
-        # Test CoinGecko API
-        async with aiohttp.ClientSession() as session:
-            url = "https://api.coingecko.com/api/v3/ping"
-            async with session.get(url) as response:
-                if response.status != 200:
-                    print("CoinGecko API not responding")
-                    return False
+        # Test Berachain connection
+        from web3 import Web3
+        BERACHAIN_RPC_URL = "https://rpc.berachain.com/"
+        w3 = Web3(Web3.HTTPProvider(BERACHAIN_RPC_URL))
         
+        # Test basic connection
+        latest_block = w3.eth.block_number
+        if latest_block is None:
+            print("Berachain connection failed")
+            return False
+        
+        print(f"Berachain connection OK - Latest block: {latest_block}")
         return True
     except Exception as e:
         print(f"Health check failed: {e}")
