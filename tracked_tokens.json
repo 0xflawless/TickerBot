@@ -17,7 +17,7 @@
     },
     "1215080426020798514": {
         "is_tracking": false,
-        "update_interval": 600,
+        "update_interval": 900,
         "last_update_time": 0,
         "config_channel_id": null,
         "display_channel_id": null,

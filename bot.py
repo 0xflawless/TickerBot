@@ -87,8 +87,8 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 tracked_guilds = {}  # Store guild configurations
 last_price = 0
 
-# Add rate limiting for CoinGecko API
-COINGECKO_RATE_LIMIT = 50  # requests per minute
+# Add rate limiting for CoinGecko API (matches actual CoinGecko limits)
+COINGECKO_RATE_LIMIT = 10  # requests per minute (conservative, CoinGecko allows 5-15)
 rate_limit_counter = 0
 last_reset_time = 0
 
@@ -118,11 +118,18 @@ async def check_rate_limit():
         last_reset_time = current_time
     
     if rate_limit_counter >= COINGECKO_RATE_LIMIT:
-        await asyncio.sleep(60 - (current_time - last_reset_time))
-        rate_limit_counter = 0
-        last_reset_time = int(time.time())
+        sleep_time = 60 - (current_time - last_reset_time)
+        if sleep_time > 0:
+            logger.warning(f"Rate limit reached ({rate_limit_counter}/{COINGECKO_RATE_LIMIT}), sleeping for {sleep_time}s")
+            await asyncio.sleep(sleep_time)
+            rate_limit_counter = 0
+            last_reset_time = int(time.time())
     
     rate_limit_counter += 1
+    
+    # Log current usage for monitoring
+    if rate_limit_counter % 5 == 0:  # Log every 5 requests
+        logger.info(f"API usage: {rate_limit_counter}/{COINGECKO_RATE_LIMIT} requests this minute")
 
 class TokenConfig:
     def __init__(self, token_id: str, token_symbol: str):
@@ -136,7 +143,7 @@ class GuildConfig:
         self.guild_id = guild_id
         self.is_tracking = False
         self.tokens = {}  # Dictionary of token_id: TokenConfig
-        self.update_interval = 600  # Default 10 minutes in seconds
+        self.update_interval = 900  # Default 15 minutes in seconds
         self.last_update_time = 0  # Track when we last updated this guild
         self.config_channel_id = None  # Channel for admin commands
         self.display_channel_id = None  # Channel for price display
@@ -228,8 +235,8 @@ async def check_rate_limit_verification():
         rate_limit_counter = 0
         last_reset_time = current_time
     
-    # More lenient limit for verification (100 requests per minute)
-    if rate_limit_counter >= 100:
+    # More lenient limit for verification (15 requests per minute to match CoinGecko)
+    if rate_limit_counter >= 15:
         sleep_time = 60 - (current_time - last_reset_time)
         if sleep_time > 0:
             logger.info(f"Rate limit reached for verification, sleeping for {sleep_time:.1f}s")
@@ -396,7 +403,7 @@ async def create_or_get_role(guild: discord.Guild, name: str, reason: str) -> di
             return None
     return role
 
-@tasks.loop(seconds=600)
+@tasks.loop(seconds=900)  # Check every 15 minutes to reduce API usage
 async def update_price_info():
     """Update bot nicknames and status for all tracked tokens"""
     try:
@@ -749,7 +756,7 @@ def load_tracked_guilds():
                 guild_id = int(guild_id_str)
                 config = GuildConfig(guild_id)
                 config.is_tracking = guild_data["is_tracking"]
-                config.update_interval = guild_data.get("update_interval", 600)  # Default to 10 minutes
+                config.update_interval = guild_data.get("update_interval", 900)  # Default to 15 minutes
                 config.last_update_time = guild_data.get("last_update_time", 0)
                 config.config_channel_id = guild_data.get("config_channel_id")
                 config.display_channel_id = guild_data.get("display_channel_id")
