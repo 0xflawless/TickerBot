@@ -229,11 +229,8 @@ async def update_price_info():
                 
                 current_price = prg_data['price']
                 
-                # Get trend indicator
-                trend = get_trend_indicator(current_price, config.last_price, 0)
-                
-                # Format price display for PRG
-                price_str = f"PRG: ${current_price:.4f}{trend}"
+                # Format price display for PRG (no trend indicator)
+                price_str = f"PRG: ${current_price:.4f}"
                 
                 # Update bot nickname with PRG price
                 try:
