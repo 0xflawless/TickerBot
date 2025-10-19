@@ -238,7 +238,7 @@ async def update_price_info():
                     await guild.me.edit(nick=price_str)
                     
                     # Update status (PRG doesn't have 24h change from contract)
-                    status = "PRG from Goldilend"
+                    status = "PRG from Goldilocks"
                     logger.debug(f"Setting status in {guild.name} to: {status}")
                     await bot.change_presence(
                         activity=discord.Activity(
