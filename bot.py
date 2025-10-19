@@ -2,7 +2,6 @@ import os
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
-import aiohttp
 import logging
 from dotenv import load_dotenv
 import time
@@ -10,11 +9,63 @@ import asyncio
 import json
 import sys
 from datetime import datetime, timedelta
+from web3 import Web3
 
 # Load environment variables
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 DEBUG = os.getenv('DEBUG', '0').lower() in ('1', 'true', 'yes')
+
+# Berachain RPC configuration
+BERACHAIN_RPC_URL = os.getenv('BERACHAIN_RPC_URL', 'https://rpc.berachain.com/')
+w3 = Web3(Web3.HTTPProvider(BERACHAIN_RPC_URL))
+
+# Smart contract addresses (from Goldilend)
+GOLDISWAP_ADDRESS = "0xb7E448E5677D212B8C8Da7D6312E8Afc49800466"
+GOLDILOCKED_ADDRESS = "0xbf2E152f460090aCE91A456e3deE5ACf703f27aD"
+TREASURY_ADDRESS = "0x895614c89beC7D11454312f740854d08CbF57A78"
+
+# ABI for smart contract interactions
+GOLDISWAP_ABI = [
+    {
+        "inputs": [],
+        "name": "fsl",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "psl", 
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalSupply",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
+
+GOLDILOCKED_ABI = [
+    {
+        "inputs": [],
+        "name": "totalSupply",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
+        "type": "function"
+    }
+]
 
 # Setup logging with debug level based on environment variable
 logging.basicConfig(
@@ -33,10 +84,21 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 tracked_guilds = {}  # Store guild configurations
 last_price = 0
 
-# Add rate limiting for CoinGecko API
-COINGECKO_RATE_LIMIT = 50  # requests per minute
-rate_limit_counter = 0
-last_reset_time = 0
+# LOCKS Price Calculation Functions (from Goldilend smart contracts)
+def floor_price(fsl: float, supply: float) -> float:
+    """Calculate floor price from FSL and supply"""
+    if supply == 0:
+        return 0
+    return fsl / supply
+
+def market_price(fsl: float, psl: float, supply: float) -> float:
+    """Calculate market price using bonding curve formula"""
+    if supply == 0:
+        return 0
+    floor = floor_price(fsl, supply)
+    if fsl == 0:
+        return 0
+    return floor + (psl / supply) * ((psl + fsl) / fsl) ** 6
 
 # Add after other global variables
 SAVE_FILE = "tracked_tokens.json"
@@ -53,144 +115,76 @@ if not TOKEN:
     logger.error("No Discord token found. Make sure DISCORD_TOKEN is set in your .env file")
     sys.exit(1)
 
-async def check_rate_limit():
-    """Check and handle CoinGecko API rate limit"""
-    global rate_limit_counter, last_reset_time
-    current_time = int(time.time())
-    
-    # Reset counter every minute
-    if current_time - last_reset_time >= 60:
-        rate_limit_counter = 0
-        last_reset_time = current_time
-    
-    if rate_limit_counter >= COINGECKO_RATE_LIMIT:
-        await asyncio.sleep(60 - (current_time - last_reset_time))
-        rate_limit_counter = 0
-        last_reset_time = int(time.time())
-    
-    rate_limit_counter += 1
-
-class TokenConfig:
-    def __init__(self, token_id: str, token_symbol: str):
-        self.token_id = token_id
-        self.token_symbol = token_symbol
-        self.display_role = None  # Add this for the display role
-        self.last_price = 0
 
 class GuildConfig:
     def __init__(self, guild_id):
         self.guild_id = guild_id
         self.is_tracking = False
-        self.tokens = {}  # Dictionary of token_id: TokenConfig
         self.update_interval = 300  # Default 5 minutes in seconds
         self.config_channel_id = None  # Channel for admin commands
         self.display_channel_id = None  # Channel for price display
+        self.last_price = 0
 
-async def fetch_token_price(token_id: str, retry_count=0):
-    """Fetch token price from CoinGecko API with retries"""
+
+async def fetch_locks_price_from_contract():
+    """Fetch LOCKS price directly from Goldilend smart contracts"""
     try:
-        await check_rate_limit()
+        # Create contract instances
+        goldiswap_contract = w3.eth.contract(
+            address=Web3.to_checksum_address(GOLDISWAP_ADDRESS),
+            abi=GOLDISWAP_ABI
+        )
+        goldilocked_contract = w3.eth.contract(
+            address=Web3.to_checksum_address(GOLDILOCKED_ADDRESS),
+            abi=GOLDILOCKED_ABI
+        )
         
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            url = "https://api.coingecko.com/api/v3/simple/price"
-            params = {
-                "ids": token_id,
-                "vs_currencies": "usd"
-            }
-            async with session.get(url, params=params) as response:
-                if response.status == 429:  # Rate limit exceeded
-                    if retry_count < MAX_RETRIES:
-                        logger.warning(f"Rate limit reached, retrying in {RETRY_DELAY} seconds...")
-                        await asyncio.sleep(RETRY_DELAY)
-                        return await fetch_token_price(token_id, retry_count + 1)
-                    else:
-                        logger.error("Max retries reached for rate limit")
-                        return None
-                
-                if response.status == 200:
-                    data = await response.json()
-                    if token_id in data and 'usd' in data[token_id]:
-                        return float(data[token_id]['usd'])
-                    else:
-                        logger.error(f"Invalid response format for {token_id}")
-                        return None
-                elif response.status >= 500 and retry_count < MAX_RETRIES:
-                    logger.warning(f"Server error {response.status}, retrying...")
-                    await asyncio.sleep(RETRY_DELAY)
-                    return await fetch_token_price(token_id, retry_count + 1)
-                else:
-                    logger.error(f"API returned status code: {response.status}")
-                    return None
-    except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-        if retry_count < MAX_RETRIES:
-            logger.warning(f"Network error, retrying... Error: {e}")
-            await asyncio.sleep(RETRY_DELAY)
-            return await fetch_token_price(token_id, retry_count + 1)
-        logger.error(f"Max retries reached for network error: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Error fetching price for {token_id}: {e}")
-        return None
-
-async def verify_token_id(token_id: str):
-    """Verify if token ID exists on CoinGecko"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.coingecko.com/api/v3/coins/{token_id}"
-            async with session.get(url) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    return data['symbol'].upper(), True
-                return None, False
-    except Exception as e:
-        logger.error(f"Error verifying token ID: {e}")
-        return None, False
-
-async def fetch_token_price_with_24h(token_id: str, retry_count=0):
-    """Fetch current price and 24h change from CoinGecko"""
-    try:
-        await check_rate_limit()
+        # Fetch contract data
+        fsl = goldiswap_contract.functions.fsl().call()
+        psl = goldiswap_contract.functions.psl().call()
+        supply = goldiswap_contract.functions.totalSupply().call()
+        locks_supply = goldilocked_contract.functions.totalSupply().call()
+        treasury_balance = goldilocked_contract.functions.balanceOf(
+            Web3.to_checksum_address(TREASURY_ADDRESS)
+        ).call()
         
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            url = "https://api.coingecko.com/api/v3/simple/price"
-            params = {
-                "ids": token_id,
-                "vs_currencies": "usd",
-                "include_24hr_change": "true"
-            }
-            async with session.get(url, params=params) as response:
-                if response.status == 429:  # Rate limit exceeded
-                    if retry_count < MAX_RETRIES:
-                        logger.warning(f"Rate limit reached, retrying in {RETRY_DELAY} seconds...")
-                        await asyncio.sleep(RETRY_DELAY)
-                        return await fetch_token_price_with_24h(token_id, retry_count + 1)
-                    else:
-                        logger.error("Max retries reached for rate limit")
-                        return None, None
-                
-                if response.status == 200:
-                    data = await response.json()
-                    if token_id in data and 'usd' in data[token_id]:
-                        price = float(data[token_id]['usd'])
-                        change_24h = float(data[token_id].get('usd_24h_change', 0))
-                        return price, change_24h
-                    else:
-                        logger.error(f"Invalid response format for {token_id}")
-                        return None, None
-                else:
-                    logger.error(f"API returned status code: {response.status}")
-                    return None, None
+        # Convert from wei to ether
+        fsl_float = w3.from_wei(fsl, 'ether')
+        psl_float = w3.from_wei(psl, 'ether')
+        supply_float = w3.from_wei(supply, 'ether')
+        
+        # Calculate LOCKS price using bonding curve
+        market = market_price(fsl_float, psl_float, supply_float)
+        floor = floor_price(fsl_float, supply_float)
+        locks_value = market - floor
+        
+        # Calculate circulating supply (total - treasury)
+        circulating_supply = w3.from_wei(locks_supply - treasury_balance, 'ether')
+        
+        logger.info(f"LOCKS Contract Data - FSL: {fsl_float}, PSL: {psl_float}, Supply: {supply_float}")
+        logger.info(f"LOCKS Price: {locks_value}, Market: {market}, Floor: {floor}")
+        
+        return {
+            'price': locks_value,
+            'market_price': market,
+            'floor_price': floor,
+            'circulating_supply': circulating_supply,
+            'fsl': fsl_float,
+            'psl': psl_float,
+            'supply': supply_float
+        }
+        
     except Exception as e:
-        logger.error(f"Error fetching price for {token_id}: {e}")
-        return None, None
+        logger.error(f"Error fetching LOCKS price from contract: {e}")
+        return None
 
-def get_trend_indicator(price: float, last_price: float, change_24h: float) -> str:
+def get_trend_indicator(price: float, last_price: float) -> str:
     """Get trend indicator based on price movement"""
     if price > last_price:
-        return "📈"  # Up trend (chart_with_upwards_trend)
+        return "📈"  # Up trend
     elif price < last_price:
-        return "📉"  # Down trend (chart_with_downwards_trend)
-    return "➡️"  # Sideways (still keep this for no change)
+        return "📉"  # Down trend
+    return "➡️"  # Sideways
 
 async def create_or_get_role(guild: discord.Guild, name: str, reason: str) -> discord.Role:
     """Create or get a role with the given name"""
@@ -208,13 +202,10 @@ async def create_or_get_role(guild: discord.Guild, name: str, reason: str) -> di
 
 @tasks.loop(seconds=60)
 async def update_price_info():
-    """Update bot nicknames and status for all tracked tokens"""
+    """Update bot nicknames and status for LOCKS price tracking"""
     try:
         current_time = int(time.time())
-        logger.info("Running price update check...")
-        
-        # Track all 24h changes for global status
-        all_24h_changes = []
+        logger.info("Running LOCKS price update check...")
         
         for guild_id, config in tracked_guilds.items():
             try:
@@ -229,65 +220,36 @@ async def update_price_info():
                 
                 logger.debug(f"Processing guild: {guild.name} ({guild_id})")
                 
-                # Reset all_24h_changes for each guild
-                all_24h_changes = []  # Move this here to reset for each guild
+                # Fetch LOCKS price from smart contract
+                locks_data = await fetch_locks_price_from_contract()
+                if locks_data is None:
+                    logger.warning(f"Failed to fetch LOCKS price for guild {guild_id}")
+                    continue
                 
-                # Collect all price information first
-                status_parts = []
-                for token_id, token_config in config.tokens.items():
-                    try:
-                        current_price, change_24h = await fetch_token_price_with_24h(token_id)
-                        if current_price is None:
-                            continue
-
-                        logger.debug(f"Got price for {token_config.token_symbol}: ${current_price:.4f}, 24h: {change_24h:+.1f}%")
-                        
-                        # Get trend indicator
-                        trend = get_trend_indicator(current_price, token_config.last_price, change_24h)
-                        
-                        # Format price display (without 24h change)
-                        price_str = f"{token_config.token_symbol}: ${current_price:.4f} {trend}"
-                        status_parts.append(price_str)
-                        
-                        # Track 24h change for this guild's status
-                        if change_24h is not None:
-                            all_24h_changes.append((token_config.token_symbol, change_24h))
-                        
-                        token_config.last_price = current_price
-
-                    except Exception as e:
-                        logger.error(f"Error processing token {token_id}: {e}")
-                        continue
-
-                # Update bot nickname with prices
-                if status_parts:
-                    try:
-                        nick = " | ".join(status_parts)
-                        if len(nick) > 32:
-                            max_tokens = len(status_parts)
-                            while max_tokens > 0:
-                                nick = " | ".join(status_parts[:max_tokens])
-                                if len(nick) <= 29:
-                                    break
-                                max_tokens -= 1
-                            nick = nick[:29] + "..." if len(nick) > 32 else nick
-                        
-                        logger.debug(f"Setting nickname in {guild.name} to: {nick}")
-                        await guild.me.edit(nick=nick)
-                        
-                        # Update status for this guild's token only
-                        if all_24h_changes:
-                            symbol, change = all_24h_changes[0]  # Get first (and only) token
-                            status = f"24h: {symbol} {change:+.1f}%"
-                            logger.debug(f"Setting status in {guild.name} to: {status}")
-                            await bot.change_presence(
-                                activity=discord.Activity(
-                                    type=discord.ActivityType.watching,
-                                    name=status
-                                )
-                            )
-                    except Exception as e:
-                        logger.error(f"Error updating display in {guild.name}: {e}")
+                current_price = locks_data['price']
+                
+                # Format price display for LOCKS (no trend indicator)
+                price_str = f"LOCKS: ${current_price:.4f}"
+                
+                # Update bot nickname with LOCKS price
+                try:
+                    logger.debug(f"Setting nickname in {guild.name} to: {price_str}")
+                    await guild.me.edit(nick=price_str)
+                    
+                    # Update status (LOCKS doesn't have 24h change from contract)
+                    status = "LOCKS from Goldilocks"
+                    logger.debug(f"Setting status in {guild.name} to: {status}")
+                    await bot.change_presence(
+                        activity=discord.Activity(
+                            type=discord.ActivityType.watching,
+                            name=status
+                        )
+                    )
+                except Exception as e:
+                    logger.error(f"Error updating display in {guild.name}: {e}")
+                
+                # Update last price
+                config.last_price = current_price
 
             except Exception as e:
                 logger.error(f"Error updating guild {guild_id}: {e}")
@@ -316,21 +278,18 @@ async def on_ready():
         update_price_info.start()
         logger.info("Price update task started")
         
-        # Log currently tracked guilds and tokens
+        # Log currently tracked guilds
         for guild_id, config in tracked_guilds.items():
             guild = bot.get_guild(guild_id)
             guild_name = guild.name if guild else "Unknown Guild"
-            logger.info(f"Tracking in {guild_name} ({guild_id}):")
-            for token_id, token_config in config.tokens.items():
-                logger.info(f"- {token_config.token_symbol} ({token_id})")
+            logger.info(f"Tracking LOCKS in {guild_name} ({guild_id})")
     except Exception as e:
         logger.error(f"Error in on_ready: {e}")
 
-@bot.tree.command(name="add_token", description="Add a token to track in this server")
-@app_commands.describe(token_id="CoinGecko token ID (e.g., 'bitcoin' or 'ethereum')")
+@bot.tree.command(name="start_locks", description="Start tracking LOCKS price from Goldilend smart contracts")
 @app_commands.default_permissions(administrator=True)
-async def add_token(interaction: discord.Interaction, token_id: str):
-    """Add a token to track"""
+async def start_locks(interaction: discord.Interaction):
+    """Start tracking LOCKS price"""
     await interaction.response.defer()
     
     guild_id = interaction.guild_id
@@ -339,110 +298,115 @@ async def add_token(interaction: discord.Interaction, token_id: str):
     
     config = tracked_guilds[guild_id]
     
-    # Check if any token is already being tracked
-    if config.tokens:
+    # Check if LOCKS is already being tracked
+    if config.is_tracking:
         await interaction.followup.send(
-            "⚠️ **Only one token can be tracked per bot instance!**\n\n"
-            "To track multiple tokens, you need to:\n"
-            "1. Create additional bot applications in Discord Developer Portal\n"
-            "2. Get tokens for each bot\n"
-            "3. Run separate instances of the bot with different tokens\n\n"
-            "See the README.md for instructions on setting up multiple bots."
+            "⚠️ **LOCKS is already being tracked in this server!**\n\n"
+            "This bot only tracks LOCKS price from Goldilend smart contracts."
         )
         return
 
-    # Rest of the add_token function remains the same...
-    token_symbol, valid = await verify_token_id(token_id)
-    if not valid:
-        await interaction.followup.send(
-            "❌ Invalid token ID. Please check the token ID on CoinGecko.\n"
-            "Example: For Bitcoin use 'bitcoin', for Ethereum use 'ethereum'"
-        )
-        return
-    
-    if token_id in config.tokens:
-        await interaction.followup.send(f"⚠️ {token_symbol} is already being tracked!")
-        return
-        
-    config.tokens[token_id] = TokenConfig(token_id, token_symbol)
+    # Start LOCKS tracking
     config.is_tracking = True
     save_tracked_guilds()
     
-    # Test price fetch
-    price = await fetch_token_price(token_id)
-    if price:
+    # Test LOCKS price fetch from contract
+    locks_data = await fetch_locks_price_from_contract()
+    if locks_data:
+        price = locks_data['price']
         interval_str = get_human_readable_time(config.update_interval)
         await interaction.followup.send(
-            f"✅ Successfully added {token_symbol} tracking!\n"
-            f"Current price: ${price:.4f}\n"
+            f"✅ Successfully started LOCKS tracking from Goldilend smart contract!\n"
+            f"Current LOCKS price: ${price:.6f}\n"
+            f"Market price: ${locks_data['market_price']:.6f}\n"
+            f"Floor price: ${locks_data['floor_price']:.6f}\n"
             f"The bot will update prices every {interval_str}."
         )
     else:
         await interaction.followup.send(
-            f"⚠️ Token added, but there was an error fetching the initial price.\n"
+            f"⚠️ LOCKS tracking started, but there was an error fetching the initial price from contract.\n"
             "The bot will retry in the next update cycle."
         )
 
-@bot.tree.command(name="remove_token")
-async def remove_token(interaction: discord.Interaction, token_symbol: str):
-    """Remove a token from tracking"""
+@bot.tree.command(name="stop_locks", description="Stop tracking LOCKS price")
+@app_commands.default_permissions(administrator=True)
+async def stop_locks(interaction: discord.Interaction):
+    """Stop tracking LOCKS price"""
     guild_id = interaction.guild_id
     if guild_id not in tracked_guilds:
-        await interaction.response.send_message("No tokens are being tracked in this server.")
+        await interaction.response.send_message("LOCKS is not being tracked in this server.")
         return
     
     config = tracked_guilds[guild_id]
-    token_symbol = token_symbol.upper()
     
-    # Find token by symbol
-    token_id_to_remove = None
-    for token_id, token_config in config.tokens.items():
-        if token_config.token_symbol == token_symbol:
-            token_id_to_remove = token_id
-            # Delete the role if it exists
-            if token_config.display_role:
-                try:
-                    await token_config.display_role.delete()
-                except Exception as e:
-                    logger.error(f"Error deleting role: {e}")
-            break
+    if not config.is_tracking:
+        await interaction.response.send_message("❌ LOCKS is not being tracked in this server.")
+        return
     
-    if token_id_to_remove:
-        del config.tokens[token_id_to_remove]
-        save_tracked_guilds()
-        await interaction.response.send_message(f"✅ Removed {token_symbol} from tracking.")
-        
-        if not config.tokens:
-            config.is_tracking = False
-    else:
-        await interaction.response.send_message(f"❌ {token_symbol} is not being tracked.")
+    config.is_tracking = False
+    save_tracked_guilds()
+    await interaction.response.send_message("✅ Stopped LOCKS price tracking.")
 
-@bot.tree.command(name="list_tokens", description="List all tracked tokens")
-async def list_tokens(interaction: discord.Interaction):
-    """List all tracked tokens and their prices"""
+@bot.tree.command(name="locks_status", description="Show LOCKS price and tracking status")
+async def locks_status(interaction: discord.Interaction):
+    """Show LOCKS price and tracking status"""
     guild_id = interaction.guild_id
     
-    if guild_id not in tracked_guilds or not tracked_guilds[guild_id].tokens:
-        await interaction.response.send_message("No tokens are being tracked in this server.")
+    if guild_id not in tracked_guilds:
+        await interaction.response.send_message("LOCKS is not being tracked in this server. Use `/start_locks` to begin tracking.")
         return
     
     config = tracked_guilds[guild_id]
     
-    embed = discord.Embed(title="Tracked Tokens", color=discord.Color.blue())
+    if not config.is_tracking:
+        await interaction.response.send_message("LOCKS is not being tracked in this server. Use `/start_locks` to begin tracking.")
+        return
     
-    for token_id, token_config in config.tokens.items():
-        price = await fetch_token_price(token_id)
-        status = f"${price:.4f}" if price else "Unable to fetch price"
+    embed = discord.Embed(title="LOCKS Price Status", color=discord.Color.blue())
+    
+    # Fetch current LOCKS data
+    locks_data = await fetch_locks_price_from_contract()
+    if locks_data:
+        price = locks_data['price']
         embed.add_field(
-            name=token_config.token_symbol,
-            value=f"Price: {status}\nToken ID: {token_id}",
+            name="LOCKS Price",
+            value=f"**Current Price:** ${price:.6f}\n"
+                  f"**Market Price:** ${locks_data['market_price']:.6f}\n"
+                  f"**Floor Price:** ${locks_data['floor_price']:.6f}\n"
+                  f"**Circulating Supply:** {locks_data['circulating_supply']:.2f}\n"
+                  f"**Source:** Goldilend Smart Contract",
+            inline=False
+        )
+        
+        # Add contract data
+        embed.add_field(
+            name="Contract Data",
+            value=f"**FSL:** {locks_data['fsl']:.6f}\n"
+                  f"**PSL:** {locks_data['psl']:.6f}\n"
+                  f"**Supply:** {locks_data['supply']:.6f}",
+            inline=True
+        )
+        
+        # Add tracking info
+        interval_str = get_human_readable_time(config.update_interval)
+        embed.add_field(
+            name="Tracking Info",
+            value=f"**Status:** ✅ Active\n"
+                  f"**Update Interval:** {interval_str}\n"
+                  f"**Last Price:** ${config.last_price:.6f}",
+            inline=True
+        )
+    else:
+        embed.add_field(
+            name="LOCKS Price",
+            value="❌ Unable to fetch price from contract\n**Source:** Goldilend Smart Contract",
             inline=False
         )
     
     await interaction.response.send_message(embed=embed)
 
 def save_tracked_guilds():
-    """Save tracked guilds and tokens to file"""
+    """Save tracked guilds to file"""
     try:
         data = {}
         for guild_id, config in tracked_guilds.items():
@@ -451,13 +415,7 @@ def save_tracked_guilds():
                 "update_interval": config.update_interval,
                 "config_channel_id": config.config_channel_id,
                 "display_channel_id": config.display_channel_id,
-                "tokens": {
-                    token_id: {
-                        "symbol": token_config.token_symbol,
-                        "last_price": token_config.last_price
-                    }
-                    for token_id, token_config in config.tokens.items()
-                }
+                "last_price": config.last_price
             }
         
         temp_file = f"{SAVE_FILE}.tmp"
@@ -468,7 +426,7 @@ def save_tracked_guilds():
         logger.error(f"Error saving tracked guilds: {e}")
 
 def load_tracked_guilds():
-    """Load tracked guilds and tokens from file"""
+    """Load tracked guilds from file"""
     try:
         if os.path.exists(SAVE_FILE):
             with open(SAVE_FILE, 'r') as f:
@@ -477,15 +435,11 @@ def load_tracked_guilds():
             for guild_id_str, guild_data in data.items():
                 guild_id = int(guild_id_str)
                 config = GuildConfig(guild_id)
-                config.is_tracking = guild_data["is_tracking"]
+                config.is_tracking = guild_data.get("is_tracking", False)
                 config.update_interval = guild_data.get("update_interval", 300)
                 config.config_channel_id = guild_data.get("config_channel_id")
                 config.display_channel_id = guild_data.get("display_channel_id")
-                
-                for token_id, token_data in guild_data["tokens"].items():
-                    token_config = TokenConfig(token_id, token_data["symbol"])
-                    token_config.last_price = token_data.get("last_price", 0)
-                    config.tokens[token_id] = token_config
+                config.last_price = guild_data.get("last_price", 0)
                 
                 tracked_guilds[guild_id] = config
     except Exception as e:
@@ -498,24 +452,26 @@ def load_tracked_guilds():
             except Exception as e:
                 logger.error(f"Failed to backup corrupted save file: {e}")
 
-@bot.tree.command(name="status", description="Check bot status and API health")
+@bot.tree.command(name="status", description="Check bot status and LOCKS contract health")
 async def check_status(interaction: discord.Interaction):
-    """Check bot status and API health"""
+    """Check bot status and LOCKS contract health"""
     await interaction.response.defer()
     
-    embed = discord.Embed(title="Bot Status", color=discord.Color.blue())
+    embed = discord.Embed(title="LOCKS Bot Status", color=discord.Color.blue())
     
-    # Check API health
+    # Check Berachain/LOCKS contract health
     try:
-        test_price = await fetch_token_price("bitcoin")
-        api_status = "✅ Operational" if test_price else "⚠️ Having issues"
+        locks_data = await fetch_locks_price_from_contract()
+        contract_status = "✅ Operational" if locks_data else "⚠️ Having issues"
+        if locks_data:
+            contract_status += f"\nLOCKS Price: ${locks_data['price']:.6f}"
     except Exception:
-        api_status = "❌ Not responding"
+        contract_status = "❌ Not responding"
     
     embed.add_field(
-        name="CoinGecko API",
-        value=api_status,
-        inline=False
+        name="Berachain/LOCKS Contract",
+        value=contract_status,
+        inline=True
     )
     
     # Add guild-specific information
@@ -530,33 +486,27 @@ async def check_status(interaction: discord.Interaction):
         else:
             interval_str = f"{interval_seconds} seconds"
         
-        # Show tokens tracked in this server
-        tokens_in_server = len(config.tokens)
-        token_list = ", ".join(token_config.token_symbol for token_config in config.tokens.values())
+        # Show LOCKS tracking status
+        locks_status = "✅ Active" if config.is_tracking else "❌ Inactive"
     else:
         interval_str = "5 minutes (default)"
-        tokens_in_server = 0
-        token_list = "None"
+        locks_status = "❌ Not configured"
     
     embed.add_field(
         name="Server Settings",
         value=f"Update Interval: {interval_str}\n"
-              f"Tokens in this server: {token_list}",
+              f"LOCKS Tracking: {locks_status}",
         inline=False
     )
     
-    # Add global statistics (count unique tokens)
+    # Add global statistics
     total_guilds = len(tracked_guilds)
-    unique_tokens = {
-        token_config.token_symbol 
-        for guild in tracked_guilds.values() 
-        for token_config in guild.tokens.values()
-    }
+    active_guilds = sum(1 for config in tracked_guilds.values() if config.is_tracking)
     
     embed.add_field(
         name="Global Statistics",
         value=f"Total Servers: {total_guilds}\n"
-              f"Unique Tokens Tracked: {len(unique_tokens)}",
+              f"Active LOCKS Tracking: {active_guilds}",
         inline=False
     )
     
@@ -644,12 +594,12 @@ async def force_update(interaction: discord.Interaction):
     
     guild_id = interaction.guild_id
     if guild_id not in tracked_guilds:
-        await interaction.followup.send("No tokens are being tracked in this server.")
+        await interaction.followup.send("LOCKS is not being tracked in this server.")
         return
     
     config = tracked_guilds[guild_id]
-    if not config.tokens:
-        await interaction.followup.send("No tokens are being tracked in this server.")
+    if not config.is_tracking:
+        await interaction.followup.send("LOCKS is not being tracked in this server.")
         return
     
     try:
@@ -718,9 +668,8 @@ async def setup(
     )
     
     embed.add_field(
-        name="1️⃣ Add Tokens",
-        value="`/add_token [token_id]` - Add tokens to track\n"
-              "Example: `/add_token bitcoin`",
+        name="1️⃣ Start LOCKS Tracking",
+        value="`/start_locks` - Start tracking LOCKS price from Goldilend smart contracts",
         inline=False
     )
     
@@ -745,8 +694,8 @@ async def setup(
     
     embed.add_field(
         name="Other Commands",
-        value="`/list_tokens` - Show tracked tokens\n"
-              "`/remove_token [symbol]` - Stop tracking a token\n"
+        value="`/locks_status` - Show LOCKS price and tracking status\n"
+              "`/stop_locks` - Stop tracking LOCKS price\n"
               "`/status` - Check bot status\n"
               "`/force_update` - Force immediate update",
         inline=False
@@ -764,381 +713,9 @@ async def setup(
             "❌ Error: Make sure the bot has permission to send messages in the configured channels."
         )
 
-# ===== ALTERNATIVE COMMANDS =====
-
-@bot.tree.command(name="track", description="Start tracking a cryptocurrency token")
-@app_commands.describe(token_id="CoinGecko token ID (e.g., 'bitcoin' or 'ethereum')")
-@app_commands.default_permissions(administrator=True)
-async def track_token(interaction: discord.Interaction, token_id: str):
-    """Alternative to add_token - Start tracking a token"""
-    await interaction.response.defer()
-    
-    guild_id = interaction.guild_id
-    if guild_id not in tracked_guilds:
-        tracked_guilds[guild_id] = GuildConfig(guild_id)
-    
-    config = tracked_guilds[guild_id]
-    
-    # Check if any token is already being tracked
-    if config.tokens:
-        await interaction.followup.send(
-            "⚠️ **Only one token can be tracked per bot instance!**\n\n"
-            "To track multiple tokens, you need to:\n"
-            "1. Create additional bot applications in Discord Developer Portal\n"
-            "2. Get tokens for each bot\n"
-            "3. Run separate instances of the bot with different tokens\n\n"
-            "See the README.md for instructions on setting up multiple bots."
-        )
-        return
-
-    token_symbol, valid = await verify_token_id(token_id)
-    if not valid:
-        await interaction.followup.send(
-            "❌ Invalid token ID. Please check the token ID on CoinGecko.\n"
-            "Example: For Bitcoin use 'bitcoin', for Ethereum use 'ethereum'"
-        )
-        return
-    
-    if token_id in config.tokens:
-        await interaction.followup.send(f"⚠️ {token_symbol} is already being tracked!")
-        return
-        
-    config.tokens[token_id] = TokenConfig(token_id, token_symbol)
-    config.is_tracking = True
-    save_tracked_guilds()
-    
-    # Test price fetch
-    price = await fetch_token_price(token_id)
-    if price:
-        interval_str = get_human_readable_time(config.update_interval)
-        await interaction.followup.send(
-            f"🎯 Now tracking {token_symbol}!\n"
-            f"Current price: ${price:.4f}\n"
-            f"Updates every {interval_str}."
-        )
-    else:
-        await interaction.followup.send(
-            f"⚠️ Token added to tracking, but there was an error fetching the initial price.\n"
-            "The bot will retry in the next update cycle."
-        )
-
-@bot.tree.command(name="untrack", description="Stop tracking a cryptocurrency token")
-@app_commands.describe(token_symbol="Token symbol to stop tracking (e.g., BTC, ETH)")
-@app_commands.default_permissions(administrator=True)
-async def untrack_token(interaction: discord.Interaction, token_symbol: str):
-    """Alternative to remove_token - Stop tracking a token"""
-    guild_id = interaction.guild_id
-    if guild_id not in tracked_guilds:
-        await interaction.response.send_message("No tokens are being tracked in this server.")
-        return
-    
-    config = tracked_guilds[guild_id]
-    token_symbol = token_symbol.upper()
-    
-    # Find token by symbol
-    token_id_to_remove = None
-    for token_id, token_config in config.tokens.items():
-        if token_config.token_symbol == token_symbol:
-            token_id_to_remove = token_id
-            # Delete the role if it exists
-            if token_config.display_role:
-                try:
-                    await token_config.display_role.delete()
-                except Exception as e:
-                    logger.error(f"Error deleting role: {e}")
-            break
-    
-    if token_id_to_remove:
-        del config.tokens[token_id_to_remove]
-        save_tracked_guilds()
-        await interaction.response.send_message(f"🛑 Stopped tracking {token_symbol}.")
-        
-        if not config.tokens:
-            config.is_tracking = False
-    else:
-        await interaction.response.send_message(f"❌ {token_symbol} is not being tracked.")
-
-@bot.tree.command(name="portfolio", description="View your tracked cryptocurrency portfolio")
-async def view_portfolio(interaction: discord.Interaction):
-    """Alternative to list_tokens - View portfolio of tracked tokens"""
-    guild_id = interaction.guild_id
-    
-    if guild_id not in tracked_guilds or not tracked_guilds[guild_id].tokens:
-        await interaction.response.send_message("📊 No tokens in your portfolio yet.")
-        return
-    
-    config = tracked_guilds[guild_id]
-    
-    embed = discord.Embed(
-        title="📊 Your Crypto Portfolio", 
-        color=discord.Color.green(),
-        description="Currently tracked tokens and their prices"
-    )
-    
-    for token_id, token_config in config.tokens.items():
-        price = await fetch_token_price(token_id)
-        status = f"${price:.4f}" if price else "Unable to fetch price"
-        embed.add_field(
-            name=f"🪙 {token_config.token_symbol}",
-            value=f"**Price:** {status}\n**ID:** `{token_id}`",
-            inline=True
-        )
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="health", description="Check bot health and system status")
-async def check_health(interaction: discord.Interaction):
-    """Alternative to status - Check bot health"""
-    await interaction.response.defer()
-    
-    embed = discord.Embed(title="🏥 Bot Health Check", color=discord.Color.green())
-    
-    # Check API health
-    try:
-        test_price = await fetch_token_price("bitcoin")
-        api_status = "✅ Healthy" if test_price else "⚠️ API Issues"
-        api_color = "🟢" if test_price else "🟡"
-    except Exception:
-        api_status = "❌ API Down"
-        api_color = "🔴"
-    
-    embed.add_field(
-        name="🌐 CoinGecko API",
-        value=f"{api_color} {api_status}",
-        inline=False
-    )
-    
-    # Add guild-specific information
-    guild_id = interaction.guild_id
-    if guild_id in tracked_guilds:
-        config = tracked_guilds[guild_id]
-        interval_seconds = config.update_interval
-        if interval_seconds >= 3600:
-            interval_str = f"{interval_seconds / 3600:.1f} hours"
-        elif interval_seconds >= 60:
-            interval_str = f"{interval_seconds / 60:.1f} minutes"
-        else:
-            interval_str = f"{interval_seconds} seconds"
-        
-        tokens_in_server = len(config.tokens)
-        token_list = ", ".join(token_config.token_symbol for token_config in config.tokens.values())
-    else:
-        interval_str = "5 minutes (default)"
-        tokens_in_server = 0
-        token_list = "None"
-    
-    embed.add_field(
-        name="⚙️ Server Configuration",
-        value=f"**Update Frequency:** {interval_str}\n"
-              f"**Tracked Tokens:** {token_list}",
-        inline=False
-    )
-    
-    # Add global statistics
-    total_guilds = len(tracked_guilds)
-    unique_tokens = {
-        token_config.token_symbol 
-        for guild in tracked_guilds.values() 
-        for token_config in guild.tokens.values()
-    }
-    
-    embed.add_field(
-        name="📈 Global Stats",
-        value=f"**Active Servers:** {total_guilds}\n"
-              f"**Unique Tokens:** {len(unique_tokens)}",
-        inline=False
-    )
-    
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(
-    name="frequency",
-    description="Set how often the bot updates prices (60 seconds to 24 hours)"
-)
-@app_commands.describe(
-    seconds="Update frequency in seconds (60 to 86400)"
-)
-@app_commands.default_permissions(administrator=True)
-async def set_frequency(interaction: discord.Interaction, seconds: int):
-    """Alternative to set_interval - Set update frequency"""
-    if not 60 <= seconds <= MAX_UPDATE_INTERVAL:
-        await interaction.response.send_message(
-            f"❌ Update frequency must be between 60 seconds and 24 hours ({MAX_UPDATE_INTERVAL} seconds)."
-        )
-        return
-    
-    guild_id = interaction.guild_id
-    if guild_id not in tracked_guilds:
-        tracked_guilds[guild_id] = GuildConfig(guild_id)
-    
-    config = tracked_guilds[guild_id]
-    old_interval = config.update_interval
-    config.update_interval = seconds
-    save_tracked_guilds()
-    
-    time_str = get_human_readable_time(seconds)
-    old_time_str = get_human_readable_time(old_interval)
-    
-    await interaction.response.send_message(
-        f"⏰ Update frequency changed from {old_time_str} to {time_str}"
-    )
-
-@bot.tree.command(
-    name="schedule",
-    description="Show current price update schedule"
-)
-async def show_schedule(interaction: discord.Interaction):
-    """Alternative to get_interval - Show update schedule"""
-    guild_id = interaction.guild_id
-    if guild_id not in tracked_guilds:
-        await interaction.response.send_message(
-            "📅 No update schedule set yet. Add a token to start tracking!"
-        )
-        return
-    
-    config = tracked_guilds[guild_id]
-    time_str = get_human_readable_time(config.update_interval)
-    
-    await interaction.response.send_message(
-        f"📅 **Current Update Schedule:** {time_str}\n"
-        f"The bot will refresh prices every {time_str}."
-    )
-
-@bot.tree.command(
-    name="refresh",
-    description="Manually refresh all token prices"
-)
-@app_commands.default_permissions(administrator=True)
-async def refresh_prices(interaction: discord.Interaction):
-    """Alternative to force_update - Refresh prices"""
-    await interaction.response.defer()
-    
-    guild_id = interaction.guild_id
-    if guild_id not in tracked_guilds:
-        await interaction.followup.send("No tokens are being tracked in this server.")
-        return
-    
-    config = tracked_guilds[guild_id]
-    if not config.tokens:
-        await interaction.followup.send("No tokens are being tracked in this server.")
-        return
-    
-    try:
-        # Reset the last update time to force an update
-        config.last_update_time = 0
-        # Run the update
-        await update_price_info()
-        await interaction.followup.send("🔄 Price refresh completed!")
-    except Exception as e:
-        logger.error(f"Error in refresh_prices: {e}")
-        await interaction.followup.send("❌ Error refreshing prices. Check logs for details.")
-
-@bot.tree.command(
-    name="reload",
-    description="Reload and sync all bot commands (Admin only)"
-)
-@app_commands.default_permissions(administrator=True)
-async def reload_commands(interaction: discord.Interaction):
-    """Alternative to sync - Reload commands"""
-    await interaction.response.defer()
-    
-    try:
-        synced = await bot.tree.sync()
-        await interaction.followup.send(
-            f"🔄 Successfully reloaded {len(synced)} commands!\n"
-            "All commands should now be available."
-        )
-        logger.info(f"Manually reloaded {len(synced)} commands")
-    except Exception as e:
-        logger.error(f"Error reloading commands: {e}")
-        await interaction.followup.send("❌ Failed to reload commands!")
-
-@bot.tree.command(
-    name="configure",
-    description="Configure bot settings and channels"
-)
-@app_commands.describe(
-    config_channel="Channel for bot configuration commands",
-    display_channel="Channel where price updates will be shown"
-)
-@app_commands.default_permissions(administrator=True)
-async def configure_bot(
-    interaction: discord.Interaction,
-    config_channel: discord.TextChannel,
-    display_channel: discord.TextChannel
-):
-    """Alternative to setup - Configure bot"""
-    await interaction.response.defer()
-    
-    guild_id = interaction.guild_id
-    if guild_id not in tracked_guilds:
-        tracked_guilds[guild_id] = GuildConfig(guild_id)
-    
-    config = tracked_guilds[guild_id]
-    
-    # Save channel IDs
-    config.config_channel_id = config_channel.id
-    config.display_channel_id = display_channel.id
-    save_tracked_guilds()
-    
-    # Create configuration message
-    embed = discord.Embed(
-        title="⚙️ Bot Configuration",
-        description="Your bot is now configured! Use these commands to manage it:",
-        color=discord.Color.purple()
-    )
-    
-    embed.add_field(
-        name="🎯 Track Tokens",
-        value="`/track [token_id]` - Start tracking a token\n"
-              "Example: `/track bitcoin`",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="⏰ Set Update Frequency",
-        value="`/frequency [seconds]` - Set how often prices update\n"
-              "Example: `/frequency 300` for 5 minutes",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="📊 Display Channel",
-        value=f"Price updates will be shown in {display_channel.mention}",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="⚙️ Config Channel",
-        value=f"Use commands in {config_channel.mention}",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="📋 Available Commands",
-        value="`/portfolio` - View tracked tokens\n"
-              "`/untrack [symbol]` - Stop tracking a token\n"
-              "`/health` - Check bot status\n"
-              "`/refresh` - Force price update\n"
-              "`/schedule` - Show update schedule",
-        inline=False
-    )
-    
-    # Send configuration guide to config channel
-    try:
-        await config_channel.send(embed=embed)
-        await interaction.followup.send(
-            f"✅ Configuration complete! Check {config_channel.mention} for management instructions."
-        )
-    except Exception as e:
-        logger.error(f"Error sending configuration message: {e}")
-        await interaction.followup.send(
-            "❌ Error: Make sure the bot has permission to send messages in the configured channels."
-        )
-
 def run_bot():
     """Run the bot"""
     bot.run(TOKEN)
 
 if __name__ == "__main__":
-    run_bot() 
+    run_bot()
