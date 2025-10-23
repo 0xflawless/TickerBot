@@ -203,10 +203,10 @@ async def create_or_get_role(guild: discord.Guild, name: str, reason: str) -> di
 
 @tasks.loop(seconds=60)
 async def update_price_info():
-    """Update bot nicknames and status for PRG price tracking"""
+    """Update bot nicknames and status for Floor Price tracking"""
     try:
         current_time = int(time.time())
-        logger.info("Running PRG price update check...")
+        logger.info("Running Floor Price update check...")
         
         for guild_id, config in tracked_guilds.items():
             try:
@@ -221,24 +221,24 @@ async def update_price_info():
                 
                 logger.debug(f"Processing guild: {guild.name} ({guild_id})")
                 
-                # Fetch PRG price from smart contract
+                # Fetch Floor Price from smart contract
                 prg_data = await fetch_prg_price_from_contract()
                 if prg_data is None:
-                    logger.warning(f"Failed to fetch PRG price for guild {guild_id}")
+                    logger.warning(f"Failed to fetch Floor Price for guild {guild_id}")
                     continue
                 
-                current_price = prg_data['price']
+                current_price = prg_data['floor_price']
                 
-                # Format price display for PRG (no trend indicator)
-                price_str = f"PRG: ${current_price:.4f}"
+                # Format price display for Floor Price (no trend indicator)
+                price_str = f"Floor: ${current_price:.4f}"
                 
-                # Update bot nickname with PRG price
+                # Update bot nickname with Floor Price
                 try:
                     logger.debug(f"Setting nickname in {guild.name} to: {price_str}")
                     await guild.me.edit(nick=price_str)
                     
-                    # Update status (PRG doesn't have 24h change from contract)
-                    status = "PRG from Goldilocks"
+                    # Update status (Floor Price from Goldilocks)
+                    status = "Floor Price from Goldilocks"
                     logger.debug(f"Setting status in {guild.name} to: {status}")
                     await bot.change_presence(
                         activity=discord.Activity(
@@ -283,14 +283,14 @@ async def on_ready():
         for guild_id, config in tracked_guilds.items():
             guild = bot.get_guild(guild_id)
             guild_name = guild.name if guild else "Unknown Guild"
-            logger.info(f"Tracking PRG in {guild_name} ({guild_id})")
+            logger.info(f"Tracking Floor Price in {guild_name} ({guild_id})")
     except Exception as e:
         logger.error(f"Error in on_ready: {e}")
 
-@bot.tree.command(name="start_prg", description="Start tracking PRG price from Goldilend smart contracts")
+@bot.tree.command(name="start_floor", description="Start tracking Floor Price from Goldilend smart contracts")
 @app_commands.default_permissions(administrator=True)
-async def start_prg(interaction: discord.Interaction):
-    """Start tracking PRG price"""
+async def start_floor(interaction: discord.Interaction):
+    """Start tracking Floor Price"""
     await interaction.response.defer()
     
     guild_id = interaction.guild_id
@@ -299,81 +299,81 @@ async def start_prg(interaction: discord.Interaction):
     
     config = tracked_guilds[guild_id]
     
-    # Check if PRG is already being tracked
+    # Check if Floor Price is already being tracked
     if config.is_tracking:
         await interaction.followup.send(
-            "⚠️ **PRG is already being tracked in this server!**\n\n"
-            "This bot only tracks PRG price from Goldilend smart contracts."
+            "⚠️ **Floor Price is already being tracked in this server!**\n\n"
+            "This bot only tracks Floor Price from Goldilend smart contracts."
         )
         return
 
-    # Start PRG tracking
+    # Start Floor Price tracking
     config.is_tracking = True
     save_tracked_guilds()
     
-    # Test PRG price fetch from contract
+    # Test Floor Price fetch from contract
     prg_data = await fetch_prg_price_from_contract()
     if prg_data:
-        price = prg_data['price']
+        price = prg_data['floor_price']
         interval_str = get_human_readable_time(config.update_interval)
         await interaction.followup.send(
-            f"✅ Successfully started PRG tracking from Goldilend smart contract!\n"
-            f"Current PRG price: ${price:.6f}\n"
+            f"✅ Successfully started Floor Price tracking from Goldilend smart contract!\n"
+            f"Current Floor Price: ${price:.6f}\n"
             f"Market price: ${prg_data['market_price']:.6f}\n"
-            f"Floor price: ${prg_data['floor_price']:.6f}\n"
+            f"PRG price: ${prg_data['price']:.6f}\n"
             f"The bot will update prices every {interval_str}."
         )
     else:
         await interaction.followup.send(
-            f"⚠️ PRG tracking started, but there was an error fetching the initial price from contract.\n"
+            f"⚠️ Floor Price tracking started, but there was an error fetching the initial price from contract.\n"
             "The bot will retry in the next update cycle."
         )
 
-@bot.tree.command(name="stop_prg", description="Stop tracking PRG price")
+@bot.tree.command(name="stop_floor", description="Stop tracking Floor Price")
 @app_commands.default_permissions(administrator=True)
-async def stop_prg(interaction: discord.Interaction):
-    """Stop tracking PRG price"""
+async def stop_floor(interaction: discord.Interaction):
+    """Stop tracking Floor Price"""
     guild_id = interaction.guild_id
     if guild_id not in tracked_guilds:
-        await interaction.response.send_message("PRG is not being tracked in this server.")
+        await interaction.response.send_message("Floor Price is not being tracked in this server.")
         return
     
     config = tracked_guilds[guild_id]
     
     if not config.is_tracking:
-        await interaction.response.send_message("❌ PRG is not being tracked in this server.")
+        await interaction.response.send_message("❌ Floor Price is not being tracked in this server.")
         return
     
     config.is_tracking = False
     save_tracked_guilds()
-    await interaction.response.send_message("✅ Stopped PRG price tracking.")
+    await interaction.response.send_message("✅ Stopped Floor Price tracking.")
 
-@bot.tree.command(name="prg_status", description="Show PRG price and tracking status")
-async def prg_status(interaction: discord.Interaction):
-    """Show PRG price and tracking status"""
+@bot.tree.command(name="floor_status", description="Show Floor Price and tracking status")
+async def floor_status(interaction: discord.Interaction):
+    """Show Floor Price and tracking status"""
     guild_id = interaction.guild_id
     
     if guild_id not in tracked_guilds:
-        await interaction.response.send_message("PRG is not being tracked in this server. Use `/start_prg` to begin tracking.")
+        await interaction.response.send_message("Floor Price is not being tracked in this server. Use `/start_floor` to begin tracking.")
         return
     
     config = tracked_guilds[guild_id]
     
     if not config.is_tracking:
-        await interaction.response.send_message("PRG is not being tracked in this server. Use `/start_prg` to begin tracking.")
+        await interaction.response.send_message("Floor Price is not being tracked in this server. Use `/start_floor` to begin tracking.")
         return
     
-    embed = discord.Embed(title="PRG Price Status", color=discord.Color.blue())
+    embed = discord.Embed(title="Floor Price Status", color=discord.Color.blue())
     
-    # Fetch current PRG data
+    # Fetch current Floor Price data
     prg_data = await fetch_prg_price_from_contract()
     if prg_data:
-        price = prg_data['price']
+        price = prg_data['floor_price']
         embed.add_field(
-            name="PRG Price",
-            value=f"**Current Price:** ${price:.6f}\n"
+            name="Floor Price",
+            value=f"**Current Floor Price:** ${price:.6f}\n"
                   f"**Market Price:** ${prg_data['market_price']:.6f}\n"
-                  f"**Floor Price:** ${prg_data['floor_price']:.6f}\n"
+                  f"**PRG Price:** ${prg_data['price']:.6f}\n"
                   f"**Circulating Supply:** {prg_data['circulating_supply']:.2f}\n"
                   f"**Source:** Goldilend Smart Contract",
             inline=False
@@ -399,7 +399,7 @@ async def prg_status(interaction: discord.Interaction):
         )
     else:
         embed.add_field(
-            name="PRG Price",
+            name="Floor Price",
             value="❌ Unable to fetch price from contract\n**Source:** Goldilend Smart Contract",
             inline=False
         )
