@@ -156,7 +156,7 @@ async def fetch_locks_price_from_contract():
         # Calculate LOCKS price using bonding curve
         market = market_price(fsl_float, psl_float, supply_float)
         floor = floor_price(fsl_float, supply_float)
-        locks_value = market - floor
+        locks_value = market  # Use market price directly for LOCKS
         
         # Calculate circulating supply (total - treasury)
         circulating_supply = w3.from_wei(locks_supply - treasury_balance, 'ether')
