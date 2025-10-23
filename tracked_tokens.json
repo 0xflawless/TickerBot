@@ -4,18 +4,13 @@
         "update_interval": 60,
         "config_channel_id": 986393724256936027,
         "display_channel_id": 986393724256936027,
-        "tokens": {
-            "goldilocks-dao": {
-                "symbol": "LOCKS",
-                "last_price": 0.01321
-            }
-        }
+        "last_price": 0.012574
     },
     "1215080426020798514": {
         "is_tracking": false,
         "update_interval": 60,
         "config_channel_id": null,
         "display_channel_id": null,
-        "tokens": {}
+        "last_price": 0
     }
 }
