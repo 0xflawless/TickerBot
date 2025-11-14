@@ -229,7 +229,7 @@ async def update_price_info():
                 current_price = locks_data['price']
                 
                 # Format price display for LOCKS (no trend indicator)
-                price_str = f"LOCKS: ${current_price:.4f}"
+                price_str = f"LOCKS: ${current_price:.5f}"
                 
                 # Update bot nickname with LOCKS price
                 try:
