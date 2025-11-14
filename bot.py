@@ -230,7 +230,7 @@ async def update_price_info():
                 current_price = prg_data['floor_price']
                 
                 # Format price display for Floor Price (no trend indicator)
-                price_str = f"Floor: ${current_price:.6f}"
+                price_str = f"Floor: ${current_price:.5f}"
                 
                 # Update bot nickname with Floor Price
                 try:
